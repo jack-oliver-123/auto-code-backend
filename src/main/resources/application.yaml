@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: auto-code-backend
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/auto_code?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: false
+server:
+  port: 9321
+  servlet:
+    context-path: /api
+# springdoc-openapi项目配置
+springdoc:
+  group-configs:
+    - group: 'default'
+      packages-to-scan: com.jack.autocodebackend.controller
+# knife4j的增强配置，不需要增强可以不配
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
