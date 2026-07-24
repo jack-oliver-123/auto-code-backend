@@ -5,7 +5,9 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.spring.service.IService;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
+import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
+import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -50,7 +52,24 @@ public interface UserService extends IService<User> {
      */
     boolean userLogout(HttpServletRequest request);
 
+    String encodePassword(String userPassword);
+
+    boolean matchesPassword(String userPassword, String storedPassword);
+
     String getEncryptPassword(String userPassword);
+
+    String generateInitialPassword();
+
+    UserAddResultVO createUserByAdmin(User user);
+
+    boolean updateUserByAdmin(User user);
+
+    boolean requiresPasswordChange(User user);
+
+    boolean changePassword(String oldPassword, String newPassword, String checkPassword,
+                           HttpServletRequest request);
+
+    UserPasswordResetResultVO resetPasswordByAdmin(Long userId);
 
     UserVO getUserVO(User user);
     List<UserVO> getUserVOList(List<User> userList);
