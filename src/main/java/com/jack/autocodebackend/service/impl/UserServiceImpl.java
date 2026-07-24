@@ -11,17 +11,28 @@ import com.jack.autocodebackend.mapper.UserMapper;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
 import com.jack.autocodebackend.model.enums.UserRoleEnum;
+import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 import org.springframework.beans.BeanUtils;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.crypto.password.Pbkdf2PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.DigestUtils;
 
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static com.jack.autocodebackend.constant.UserConstant.USER_LOGIN_STATE;
@@ -35,89 +46,106 @@ import static com.jack.autocodebackend.constant.UserConstant.USER_LOGIN_STATE;
 public class UserServiceImpl extends ServiceImpl<UserMapper, User>
     implements UserService{
 
+    private static final String LEGACY_PASSWORD_SALT = "Jack";
+
+    private static final Pattern LEGACY_MD5_PATTERN = Pattern.compile("^[a-f0-9]{32}$");
+
+    private static final String CURRENT_PASSWORD_PREFIX = "{pbkdf2}";
+
+    private static final String TEMPORARY_PASSWORD_PREFIX = "{temporary}";
+
+    private static final String INITIAL_PASSWORD_CHARACTERS =
+            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+
+    private static final int INITIAL_PASSWORD_LENGTH = 16;
+
+    private static final int MIN_ACCOUNT_LENGTH = 4;
+
+    private static final int MAX_ACCOUNT_LENGTH = 256;
+
+    private static final int MIN_PASSWORD_LENGTH = 8;
+
+    private static final Map<String, String> SORT_FIELD_MAP = Map.of(
+            "id", "id",
+            "userAccount", "userAccount",
+            "userName", "userName",
+            "userRole", "userRole",
+            "createTime", "createTime",
+            "updateTime", "updateTime"
+    );
+
+    private final PasswordEncoder currentPasswordEncoder =
+            Pbkdf2PasswordEncoder.defaultsForSpringSecurity_v5_8();
+
+    private final PasswordEncoder legacyBcryptPasswordEncoder = new BCryptPasswordEncoder();
+
+    private final SecureRandom secureRandom = new SecureRandom();
+
     @Override
     public long userRegister(String userAccount, String userPassword, String checkPassword) {
-        //1. 校验
-        if (StrUtil.hasBlank(userAccount, userPassword, checkPassword)){
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "参数为空");
-        }
-        if (userAccount.length() < 4){
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户账号过短");
-        }
-        if(userPassword.length() < 8 || checkPassword.length() < 8){
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户密码过短");
-        }
-        if(!userPassword.equals(checkPassword)){
+        validateUserAccount(userAccount);
+        validatePassword(userPassword);
+        validatePassword(checkPassword);
+        if (!userPassword.equals(checkPassword)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "两次输入的密码不一致");
         }
 
-        //2. 检查是否重复
-        QueryWrapper<User> userQueryWrapper = new QueryWrapper<>();
-        userQueryWrapper.eq("userAccount",userAccount);
-        Long count = this.baseMapper.selectCount(userQueryWrapper);
-        if (count > 0){
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号重复");
-        }
+        ensureActiveAccountAvailable(userAccount);
 
-        //3. 加密
-        String encryptPassword = getEncryptPassword(userPassword);
-
-        //4.插入数据
         User user = new User();
         user.setUserAccount(userAccount);
-        user.setUserPassword(encryptPassword);
+        user.setUserPassword(encodePassword(userPassword));
         user.setUserName("无名");
         user.setUserRole(UserRoleEnum.USER.getValue());
-        boolean saveResult = this.save(user);
-        if (!saveResult){
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "注册失败，数据库错误");
-        }
+        saveNewUser(user, ErrorCode.SYSTEM_ERROR, "注册失败，数据库错误");
         return user.getId();
     }
 
     @Override
     public UserLoginVO userLogin(String userAccount, String userPassword, HttpServletRequest request) {
-        // 1. 校验
-        if (StrUtil.hasBlank(userAccount, userPassword)) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "参数为空");
-        }
-        if (userAccount.length() < 4) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号错误");
-        }
-        if (userPassword.length() < 8) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "密码错误");
-        }
-        // 2. 加密
-        String encryptPassword = getEncryptPassword(userPassword);
-        // 查询用户是否存在
+        validateUserAccount(userAccount);
+        validatePassword(userPassword);
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq("userAccount", userAccount);
-        queryWrapper.eq("userPassword", encryptPassword);
         User user = this.baseMapper.selectOne(queryWrapper);
-        // 用户不存在
-        if (user == null) {
+        if (user == null || !matchesPassword(userPassword, user.getUserPassword())) {
             log.debug("user login failed, userAccount cannot match userPassword");
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在或密码错误");
         }
-        // 3. 记录用户的登录态
-        request.getSession().setAttribute(USER_LOGIN_STATE, user);
+        if (needsPasswordUpgrade(user.getUserPassword())) {
+            String upgradedPassword = encodePassword(userPassword);
+            User updateUser = new User();
+            updateUser.setId(user.getId());
+            updateUser.setUserPassword(upgradedPassword);
+            if (!this.updateById(updateUser)) {
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "密码安全升级失败");
+            }
+            user.setUserPassword(upgradedPassword);
+        }
+        establishAuthenticatedSession(request, user);
         return this.getLoginUserVO(user);
     }
 
 
     @Override
     public User getLoginUser(HttpServletRequest request) {
-        //先判断是否已登录
-        Object userObj = request.getSession().getAttribute(USER_LOGIN_STATE);
-        User currentUser = (User) userObj;
-        if (currentUser == null || currentUser.getId() == null){
+        if (request == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        HttpSession session = request.getSession(false);
+        if (session == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        Object userObj = session.getAttribute(USER_LOGIN_STATE);
+        if (!(userObj instanceof User sessionUser) || sessionUser.getId() == null) {
+            session.invalidate();
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
 
-        //从数据库查询
-        long userId = currentUser.getId();
-        currentUser = this.getById(userId);
-        if (currentUser == null){
+        User currentUser = this.getById(sessionUser.getId());
+        if (currentUser == null
+                || !Objects.equals(sessionUser.getUserPassword(), currentUser.getUserPassword())) {
+            session.invalidate();
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
         return currentUser;
@@ -130,26 +158,138 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         }
         UserLoginVO loginUserVO = new UserLoginVO();
         BeanUtils.copyProperties(user, loginUserVO);
+        loginUserVO.setNeedChangePassword(requiresPasswordChange(user));
         return loginUserVO;
     }
 
     @Override
     public boolean userLogout(HttpServletRequest request) {
-        // 先判断是否已登录
-        Object userObj = request.getSession().getAttribute(USER_LOGIN_STATE);
-        if (userObj == null) {
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "未登录");
+        HttpSession session = request == null ? null : request.getSession(false);
+        if (session == null || session.getAttribute(USER_LOGIN_STATE) == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
-        // 移除登录态
-        request.getSession().removeAttribute(USER_LOGIN_STATE);
+        session.invalidate();
         return true;
     }
 
     @Override
+    public String encodePassword(String userPassword) {
+        return CURRENT_PASSWORD_PREFIX + currentPasswordEncoder.encode(userPassword);
+    }
+
+    @Override
+    public boolean matchesPassword(String userPassword, String storedPassword) {
+        if (StrUtil.isBlank(userPassword) || StrUtil.isBlank(storedPassword)) {
+            return false;
+        }
+        String encodedPassword = unwrapTemporaryPassword(storedPassword);
+        try {
+            if (encodedPassword.startsWith(CURRENT_PASSWORD_PREFIX)) {
+                return currentPasswordEncoder.matches(userPassword,
+                        encodedPassword.substring(CURRENT_PASSWORD_PREFIX.length()));
+            }
+            if (isLegacyPassword(encodedPassword)) {
+                return getEncryptPassword(userPassword).equals(encodedPassword);
+            }
+            if (encodedPassword.startsWith("$2")) {
+                return legacyBcryptPasswordEncoder.matches(userPassword, encodedPassword);
+            }
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+        return false;
+    }
+
+    @Override
     public String getEncryptPassword(String userPassword) {
-        // 盐值，混淆密码
-        final String SALT = "Jack";
-        return DigestUtils.md5DigestAsHex((SALT + userPassword).getBytes());
+        return DigestUtils.md5DigestAsHex(
+                (LEGACY_PASSWORD_SALT + userPassword).getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    public String generateInitialPassword() {
+        StringBuilder password = new StringBuilder(INITIAL_PASSWORD_LENGTH);
+        for (int i = 0; i < INITIAL_PASSWORD_LENGTH; i++) {
+            int index = secureRandom.nextInt(INITIAL_PASSWORD_CHARACTERS.length());
+            password.append(INITIAL_PASSWORD_CHARACTERS.charAt(index));
+        }
+        return password.toString();
+    }
+
+    @Override
+    public UserAddResultVO createUserByAdmin(User user) {
+        if (user == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户参数为空");
+        }
+        validateUserAccount(user.getUserAccount());
+        validateUserFields(user);
+        if (StrUtil.isBlank(user.getUserRole())) {
+            user.setUserRole(UserRoleEnum.USER.getValue());
+        } else {
+            validateUserRole(user.getUserRole());
+        }
+        ensureActiveAccountAvailable(user.getUserAccount());
+
+        String initialPassword = generateInitialPassword();
+        user.setUserPassword(TEMPORARY_PASSWORD_PREFIX + encodePassword(initialPassword));
+        saveNewUser(user, ErrorCode.OPERATION_ERROR, ErrorCode.OPERATION_ERROR.getMessage());
+        UserAddResultVO result = new UserAddResultVO();
+        result.setUserId(user.getId());
+        result.setInitialPassword(initialPassword);
+        return result;
+    }
+
+    @Override
+    public boolean updateUserByAdmin(User user) {
+        if (user == null || user.getId() == null || user.getId() <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户 id 不合法");
+        }
+        validateUserFields(user);
+        if (user.getUserRole() != null) {
+            validateUserRole(user.getUserRole());
+        }
+        return this.updateById(user);
+    }
+
+    @Override
+    public boolean requiresPasswordChange(User user) {
+        return user != null && isTemporaryPassword(user.getUserPassword());
+    }
+
+    @Override
+    public boolean changePassword(String oldPassword, String newPassword, String checkPassword,
+                                  HttpServletRequest request) {
+        validatePassword(oldPassword);
+        validatePassword(newPassword);
+        validatePassword(checkPassword);
+        if (!newPassword.equals(checkPassword)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "两次输入的新密码不一致");
+        }
+
+        User loginUser = getLoginUser(request);
+        if (!matchesPassword(oldPassword, loginUser.getUserPassword())) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "原密码错误");
+        }
+        if (matchesPassword(newPassword, loginUser.getUserPassword())) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "新密码不能与原密码相同");
+        }
+
+        String encodedPassword = encodePassword(newPassword);
+        User updateUser = new User();
+        updateUser.setId(loginUser.getId());
+        updateUser.setUserPassword(encodedPassword);
+        if (!this.updateById(updateUser)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "修改密码失败");
+        }
+
+        loginUser.setUserPassword(encodedPassword);
+        HttpSession session = request.getSession(false);
+        if (session == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        request.changeSessionId();
+        session.setAttribute(USER_LOGIN_STATE, loginUser);
+        return true;
     }
 
     @Override
@@ -180,7 +320,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         String userName = userQueryRequest.getUserName();
         String userProfile = userQueryRequest.getUserProfile();
         String userRole = userQueryRequest.getUserRole();
-        String sortField = userQueryRequest.getSortField();
+        String sortField = SORT_FIELD_MAP.get(userQueryRequest.getSortField());
         String sortOrder = userQueryRequest.getSortOrder();
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq(ObjUtil.isNotNull(id), "id", id);
@@ -188,8 +328,91 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         queryWrapper.like(StrUtil.isNotBlank(userAccount), "userAccount", userAccount);
         queryWrapper.like(StrUtil.isNotBlank(userName), "userName", userName);
         queryWrapper.like(StrUtil.isNotBlank(userProfile), "userProfile", userProfile);
-        queryWrapper.orderBy(StrUtil.isNotEmpty(sortField), sortOrder.equals("ascend"), sortField);
+        queryWrapper.orderBy(StrUtil.isNotBlank(sortField), "ascend".equals(sortOrder), sortField);
         return queryWrapper;
+    }
+
+    private void establishAuthenticatedSession(HttpServletRequest request, User user) {
+        HttpSession session = request.getSession(false);
+        if (session == null) {
+            session = request.getSession(true);
+        } else {
+            request.changeSessionId();
+        }
+        session.setAttribute(USER_LOGIN_STATE, user);
+    }
+
+    private void validateUserAccount(String userAccount) {
+        if (StrUtil.isBlank(userAccount)
+                || userAccount.length() < MIN_ACCOUNT_LENGTH
+                || userAccount.length() > MAX_ACCOUNT_LENGTH) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR,
+                    "用户账号长度应为 4 到 256 位");
+        }
+    }
+
+    private void validatePassword(String userPassword) {
+        if (StrUtil.isBlank(userPassword) || userPassword.length() < MIN_PASSWORD_LENGTH) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户密码不能少于 8 位");
+        }
+    }
+
+    private void validateUserFields(User user) {
+        validateMaxLength(user.getUserName(), 256, "用户昵称不能超过 256 位");
+        validateMaxLength(user.getUserAvatar(), 1024, "用户头像地址不能超过 1024 位");
+        validateMaxLength(user.getUserProfile(), 512, "用户简介不能超过 512 位");
+    }
+
+    private void validateMaxLength(String value, int maxLength, String message) {
+        if (value != null && value.length() > maxLength) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, message);
+        }
+    }
+
+    private void validateUserRole(String userRole) {
+        if (UserRoleEnum.getEnumByValue(userRole) == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户角色不合法");
+        }
+    }
+
+    private void ensureActiveAccountAvailable(String userAccount) {
+        QueryWrapper<User> userQueryWrapper = new QueryWrapper<>();
+        userQueryWrapper.eq("userAccount", userAccount);
+        Long count = this.baseMapper.selectCount(userQueryWrapper);
+        if (count != null && count > 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号重复");
+        }
+    }
+
+    private void saveNewUser(User user, ErrorCode saveErrorCode, String saveErrorMessage) {
+        try {
+            if (!this.save(user)) {
+                throw new BusinessException(saveErrorCode, saveErrorMessage);
+            }
+        } catch (DuplicateKeyException e) {
+            // 唯一索引同时保留逻辑删除账号，并作为并发注册的最终一致性兜底。
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号重复");
+        }
+    }
+
+    private boolean needsPasswordUpgrade(String storedPassword) {
+        return !isTemporaryPassword(storedPassword)
+                && (isLegacyPassword(storedPassword)
+                || (storedPassword != null && storedPassword.startsWith("$2")));
+    }
+
+    private boolean isLegacyPassword(String storedPassword) {
+        return storedPassword != null && LEGACY_MD5_PATTERN.matcher(storedPassword).matches();
+    }
+
+    private boolean isTemporaryPassword(String storedPassword) {
+        return storedPassword != null && storedPassword.startsWith(TEMPORARY_PASSWORD_PREFIX);
+    }
+
+    private String unwrapTemporaryPassword(String storedPassword) {
+        return isTemporaryPassword(storedPassword)
+                ? storedPassword.substring(TEMPORARY_PASSWORD_PREFIX.length())
+                : storedPassword;
     }
 
 }

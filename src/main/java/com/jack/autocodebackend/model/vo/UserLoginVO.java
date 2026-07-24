@@ -39,6 +39,11 @@ public class UserLoginVO implements Serializable {
     private String userRole;
 
     /**
+     * 是否必须先修改管理员分配的初始密码
+     */
+    private Boolean needChangePassword;
+
+    /**
      * 创建时间
      */
     private Date createTime;
