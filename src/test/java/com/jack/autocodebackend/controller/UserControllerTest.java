@@ -8,6 +8,7 @@ import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
 import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
+import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -203,6 +204,57 @@ class UserControllerTest {
         assertThat(newUser.getUserAccount()).isEqualTo("addedAccount");
         assertThat(newUser.getUserName()).isEqualTo("新增用户");
         assertThat(newUser.getUserPassword()).isNull();
+    }
+
+    @Test
+    void resetPasswordReturnsOneTimeTemporaryCredential() throws Exception {
+        UserPasswordResetResultVO result = new UserPasswordResetResultVO();
+        result.setUserId(301L);
+        result.setTemporaryPassword("Rotated-Temp-8!zQ");
+        given(userService.resetPasswordByAdmin(301L)).willReturn(result);
+
+        mockMvc.perform(post("/user/password/reset")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 301}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.userId").value("301"))
+                .andExpect(jsonPath("$.data.temporaryPassword").value("Rotated-Temp-8!zQ"))
+                .andExpect(header().string("Cache-Control", "no-store"));
+
+        verify(userService).resetPasswordByAdmin(301L);
+    }
+
+    @Test
+    void resetPasswordRejectsInvalidUserId() throws Exception {
+        mockMvc.perform(post("/user/password/reset")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 0}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(40000));
+
+        verify(userService, never()).resetPasswordByAdmin(anyLong());
+    }
+
+    @Test
+    void resetPasswordRejectsOrdinaryUser() throws Exception {
+        User ordinaryUser = createUser(2L, "userAccount", "普通用户", "user");
+        given(userService.getLoginUser(any(HttpServletRequest.class))).willReturn(ordinaryUser);
+
+        mockMvc.perform(post("/user/password/reset")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 301}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(40101))
+                .andExpect(jsonPath("$.message").value("无权限"));
+
+        verify(userService, never()).resetPasswordByAdmin(anyLong());
     }
 
     @Test

@@ -13,6 +13,7 @@ import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.*;
 import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
+import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
 import jakarta.annotation.Resource;
@@ -80,6 +81,23 @@ public class UserController {
                 passwordChangeRequest.getCheckPassword(),
                 request);
         return ResultUtils.success(result);
+    }
+
+    /**
+     * 管理员轮换用户密码。返回的新密码仅展示一次，用户登录后必须立即修改。
+     */
+    @PostMapping("/password/reset")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<UserPasswordResetResultVO> resetPassword(
+            @RequestBody UserPasswordResetDTO passwordResetRequest,
+            HttpServletResponse response) {
+        ThrowUtils.throwIf(passwordResetRequest == null
+                        || passwordResetRequest.getUserId() == null
+                        || passwordResetRequest.getUserId() <= 0,
+                ErrorCode.PARAMS_ERROR);
+        response.setHeader("Cache-Control", "no-store");
+        return ResultUtils.success(
+                userService.resetPasswordByAdmin(passwordResetRequest.getUserId()));
     }
 
     /**

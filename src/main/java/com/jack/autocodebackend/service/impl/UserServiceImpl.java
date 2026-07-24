@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.ObjUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
@@ -13,6 +14,7 @@ import com.jack.autocodebackend.model.dto.UserQueryDTO;
 import com.jack.autocodebackend.model.enums.UserRoleEnum;
 import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
+import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
 
@@ -113,14 +115,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在或密码错误");
         }
         if (needsPasswordUpgrade(user.getUserPassword())) {
-            String upgradedPassword = encodePassword(userPassword);
-            User updateUser = new User();
-            updateUser.setId(user.getId());
-            updateUser.setUserPassword(upgradedPassword);
-            if (!this.updateById(updateUser)) {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "密码安全升级失败");
-            }
-            user.setUserPassword(upgradedPassword);
+            user = upgradePassword(user, userPassword);
         }
         establishAuthenticatedSession(request, user);
         return this.getLoginUserVO(user);
@@ -293,6 +288,26 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
     }
 
     @Override
+    public UserPasswordResetResultVO resetPasswordByAdmin(Long userId) {
+        if (userId == null || userId <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户 id 不合法");
+        }
+
+        String temporaryPassword = generateInitialPassword();
+        User updateUser = new User();
+        updateUser.setId(userId);
+        updateUser.setUserPassword(TEMPORARY_PASSWORD_PREFIX + encodePassword(temporaryPassword));
+        if (!this.updateById(updateUser)) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR);
+        }
+
+        UserPasswordResetResultVO result = new UserPasswordResetResultVO();
+        result.setUserId(userId);
+        result.setTemporaryPassword(temporaryPassword);
+        return result;
+    }
+
+    @Override
     public UserVO getUserVO(User user) {
         if (user == null) {
             return null;
@@ -320,7 +335,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         String userName = userQueryRequest.getUserName();
         String userProfile = userQueryRequest.getUserProfile();
         String userRole = userQueryRequest.getUserRole();
-        String sortField = SORT_FIELD_MAP.get(userQueryRequest.getSortField());
+        String requestedSortField = userQueryRequest.getSortField();
+        String sortField = StrUtil.isBlank(requestedSortField)
+                ? null
+                : SORT_FIELD_MAP.get(requestedSortField);
         String sortOrder = userQueryRequest.getSortOrder();
         QueryWrapper<User> queryWrapper = new QueryWrapper<>();
         queryWrapper.eq(ObjUtil.isNotNull(id), "id", id);
@@ -330,6 +348,28 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         queryWrapper.like(StrUtil.isNotBlank(userProfile), "userProfile", userProfile);
         queryWrapper.orderBy(StrUtil.isNotBlank(sortField), "ascend".equals(sortOrder), sortField);
         return queryWrapper;
+    }
+
+    private User upgradePassword(User user, String rawPassword) {
+        String previousPassword = user.getUserPassword();
+        String upgradedPassword = encodePassword(rawPassword);
+        UpdateWrapper<User> updateWrapper = new UpdateWrapper<>();
+        updateWrapper.eq("id", user.getId())
+                .eq("userPassword", previousPassword)
+                .set("userPassword", upgradedPassword);
+        if (this.baseMapper.update(null, updateWrapper) == 1) {
+            user.setUserPassword(upgradedPassword);
+            return user;
+        }
+
+        User currentUser = this.baseMapper.selectById(user.getId());
+        if (currentUser == null || !matchesPassword(rawPassword, currentUser.getUserPassword())) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在或密码错误");
+        }
+        if (needsPasswordUpgrade(currentUser.getUserPassword())) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "密码安全升级失败");
+        }
+        return currentUser;
     }
 
     private void establishAuthenticatedSession(HttpServletRequest request, User user) {

@@ -7,6 +7,7 @@ import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
 import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
+import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -67,6 +68,8 @@ public interface UserService extends IService<User> {
 
     boolean changePassword(String oldPassword, String newPassword, String checkPassword,
                            HttpServletRequest request);
+
+    UserPasswordResetResultVO resetPasswordByAdmin(Long userId);
 
     UserVO getUserVO(User user);
     List<UserVO> getUserVOList(List<User> userList);

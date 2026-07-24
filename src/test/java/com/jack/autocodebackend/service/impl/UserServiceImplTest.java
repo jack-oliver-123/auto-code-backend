@@ -1,6 +1,7 @@
 package com.jack.autocodebackend.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.mapper.UserMapper;
 import com.jack.autocodebackend.model.domain.User;
@@ -9,6 +10,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -16,7 +18,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -92,14 +94,12 @@ class UserServiceImplTest {
     void userLoginUpgradesBareBcryptPassword() {
         User user = createUser(new BCryptPasswordEncoder().encode("12345678"));
         given(userMapper.selectOne(any(QueryWrapper.class))).willReturn(user);
-        given(userMapper.updateById(org.mockito.ArgumentMatchers.<User>any())).willReturn(1);
+        given(userMapper.update(any(), any(UpdateWrapper.class))).willReturn(1);
 
         userService.userLogin("testAccount", "12345678", request);
 
-        verify(userMapper).updateById(argThat((User update) ->
-                update.getId().equals(user.getId())
-                        && update.getUserPassword().startsWith("{pbkdf2}")
-                        && userService.matchesPassword("12345678", update.getUserPassword())));
+        assertThat(user.getUserPassword()).startsWith("{pbkdf2}");
+        assertThat(userService.matchesPassword("12345678", user.getUserPassword())).isTrue();
     }
 
     @Test
@@ -107,14 +107,13 @@ class UserServiceImplTest {
         String legacyPassword = userService.getEncryptPassword("12345678");
         User user = createUser(legacyPassword);
         given(userMapper.selectOne(any(QueryWrapper.class))).willReturn(user);
-        given(userMapper.updateById(org.mockito.ArgumentMatchers.<User>any())).willReturn(1);
+        given(userMapper.update(any(), any(UpdateWrapper.class))).willReturn(1);
 
         userService.userLogin("testAccount", "12345678", request);
 
-        verify(userMapper).updateById(argThat((User update) ->
-                update.getId().equals(user.getId())
-                        && update.getUserPassword().startsWith("{pbkdf2}")
-                        && userService.matchesPassword("12345678", update.getUserPassword())));
+        UpdateWrapper<User> updateWrapper = capturePasswordUpgradeWrapper();
+        assertThat(updateWrapper.getSqlSegment()).contains("id =").contains("userPassword =");
+        assertThat(updateWrapper.getParamNameValuePairs()).containsValue(legacyPassword);
         assertThat(user.getUserPassword()).startsWith("{pbkdf2}");
         verify(session).setAttribute("user_login", user);
     }
@@ -124,12 +123,45 @@ class UserServiceImplTest {
         String password = "long-password-" + "密".repeat(30);
         User user = createUser(userService.getEncryptPassword(password));
         given(userMapper.selectOne(any(QueryWrapper.class))).willReturn(user);
-        given(userMapper.updateById(org.mockito.ArgumentMatchers.<User>any())).willReturn(1);
+        given(userMapper.update(any(), any(UpdateWrapper.class))).willReturn(1);
 
         userService.userLogin("testAccount", password, request);
 
         assertThat(user.getUserPassword()).startsWith("{pbkdf2}");
         assertThat(userService.matchesPassword(password, user.getUserPassword())).isTrue();
+    }
+
+    @Test
+    void userLoginUsesWinningHashWhenConcurrentPasswordUpgradeLosesRace() {
+        String password = "12345678";
+        User staleUser = createUser(userService.getEncryptPassword(password));
+        User winningUser = createUser(userService.encodePassword(password));
+        given(userMapper.selectOne(any(QueryWrapper.class))).willReturn(staleUser);
+        given(userMapper.update(any(), any(UpdateWrapper.class))).willReturn(0);
+        given(userMapper.selectById(staleUser.getId())).willReturn(winningUser);
+
+        userService.userLogin("testAccount", password, request);
+
+        verify(session).setAttribute("user_login", winningUser);
+        given(session.getAttribute("user_login")).willReturn(winningUser);
+        assertThat(userService.getLoginUser(request)).isSameAs(winningUser);
+        verify(session, never()).invalidate();
+    }
+
+    @Test
+    void userLoginRejectsPasswordChangedDuringLegacyUpgrade() {
+        String password = "12345678";
+        User staleUser = createUser(userService.getEncryptPassword(password));
+        User resetUser = createUser(userService.encodePassword("differentPassword"));
+        given(userMapper.selectOne(any(QueryWrapper.class))).willReturn(staleUser);
+        given(userMapper.update(any(), any(UpdateWrapper.class))).willReturn(0);
+        given(userMapper.selectById(staleUser.getId())).willReturn(resetUser);
+
+        assertThatThrownBy(() -> userService.userLogin("testAccount", password, request))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("用户不存在或密码错误");
+
+        verify(session, never()).setAttribute(any(), any());
     }
 
     @Test
@@ -193,6 +225,32 @@ class UserServiceImplTest {
         assertThat(userService.matchesPassword("Initial-Password-1!", databaseUser.getUserPassword())).isFalse();
         verify(request).changeSessionId();
         verify(session).setAttribute("user_login", databaseUser);
+    }
+
+    @Test
+    void resetPasswordByAdminReturnsNewTemporaryCredential() {
+        given(userMapper.updateById(any(User.class))).willReturn(1);
+
+        var result = userService.resetPasswordByAdmin(2001L);
+
+        ArgumentCaptor<User> userCaptor = ArgumentCaptor.forClass(User.class);
+        verify(userMapper).updateById(userCaptor.capture());
+        User resetUser = userCaptor.getValue();
+        assertThat(resetUser.getId()).isEqualTo(2001L);
+        assertThat(resetUser.getUserPassword()).startsWith("{temporary}{pbkdf2}");
+        assertThat(userService.matchesPassword(
+                result.getTemporaryPassword(), resetUser.getUserPassword())).isTrue();
+        assertThat(userService.requiresPasswordChange(resetUser)).isTrue();
+        assertThat(result.getUserId()).isEqualTo(2001L);
+    }
+
+    @Test
+    void resetPasswordByAdminRejectsMissingUser() {
+        given(userMapper.updateById(any(User.class))).willReturn(0);
+
+        assertThatThrownBy(() -> userService.resetPasswordByAdmin(999L))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("请求数据不存在");
     }
 
     @Test
@@ -315,6 +373,23 @@ class UserServiceImplTest {
         QueryWrapper<User> wrapper = userService.getQueryWrapper(request);
 
         assertThat(wrapper.getSqlSegment()).doesNotContain("drop table").doesNotContain("ORDER BY");
+    }
+
+    @Test
+    void getQueryWrapperAllowsMissingSortField() {
+        UserQueryDTO request = new UserQueryDTO();
+
+        QueryWrapper<User> wrapper = userService.getQueryWrapper(request);
+
+        assertThat(wrapper.getSqlSegment()).doesNotContain("ORDER BY");
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private UpdateWrapper<User> capturePasswordUpgradeWrapper() {
+        ArgumentCaptor<UpdateWrapper<User>> wrapperCaptor =
+                (ArgumentCaptor) ArgumentCaptor.forClass(UpdateWrapper.class);
+        verify(userMapper).update(isNull(), wrapperCaptor.capture());
+        return wrapperCaptor.getValue();
     }
 
     private static User createUser(String password) {
