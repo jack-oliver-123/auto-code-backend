@@ -1,0 +1,19 @@
+package com.jack.autocodebackend.core.parser;
+
+import com.jack.autocodebackend.ai.model.CodeResult;
+
+/**
+ * 代码解析器策略接口
+ *
+ * @author yupi
+ */
+public interface CodeParser<T extends CodeResult> {
+
+    /**
+     * 解析代码内容
+     *
+     * @param codeContent 原始代码内容
+     * @return 解析后的结果对象
+     */
+    T parseCode(String codeContent);
+}
