@@ -3,6 +3,7 @@ package com.jack.autocodebackend.core.saver;
 import cn.hutool.core.util.StrUtil;
 import com.jack.autocodebackend.ai.model.HtmlCodeResult;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
+import com.jack.autocodebackend.core.validator.HtmlDocumentValidator;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 
@@ -26,6 +27,9 @@ public final class HtmlCodeFileSaverTemplate extends CodeFileSaverTemplate<HtmlC
         super.validateInput(result);
         if (StrUtil.isBlank(result.getHtmlCode())) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "HTML 代码内容不能为空");
+        }
+        if (!HtmlDocumentValidator.isCompleteDocument(result.getHtmlCode())) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "HTML 代码不是完整的 HTML 文档");
         }
     }
 }

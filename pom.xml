@@ -16,6 +16,7 @@
 
     <properties>
         <java.version>21</java.version>
+        <langchain4j.version>1.18.0-beta28</langchain4j.version>
     </properties>
 
     <dependencies>
@@ -33,17 +34,17 @@
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-open-ai-spring-boot4-starter</artifactId>
-            <version>1.18.0-beta28</version>
+            <version>${langchain4j.version}</version>
         </dependency>
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-spring-boot4-starter</artifactId>
-            <version>1.18.0-beta28</version>
+            <version>${langchain4j.version}</version>
         </dependency>
         <dependency>
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-reactor</artifactId>
-            <version>1.18.0-beta28</version>
+            <version>${langchain4j.version}</version>
         </dependency>
 
 
@@ -165,5 +166,19 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>live-ai-tests</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>

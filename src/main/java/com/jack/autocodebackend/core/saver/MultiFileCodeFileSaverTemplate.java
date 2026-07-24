@@ -3,6 +3,7 @@ package com.jack.autocodebackend.core.saver;
 import cn.hutool.core.util.StrUtil;
 import com.jack.autocodebackend.ai.model.MultiFileCodeResult;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
+import com.jack.autocodebackend.core.validator.HtmlDocumentValidator;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 
@@ -29,6 +30,9 @@ public final class MultiFileCodeFileSaverTemplate extends CodeFileSaverTemplate<
         requireCode(result.getHtmlCode(), "HTML");
         requireCode(result.getCssCode(), "CSS");
         requireCode(result.getJsCode(), "JavaScript");
+        if (!HtmlDocumentValidator.isCompleteDocument(result.getHtmlCode())) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "HTML 代码不是完整的 HTML 文档");
+        }
     }
 
     private void requireCode(String code, String codeType) {

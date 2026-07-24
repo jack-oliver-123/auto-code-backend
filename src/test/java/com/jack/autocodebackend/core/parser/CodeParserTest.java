@@ -68,6 +68,24 @@ class CodeParserTest {
     }
 
     @Test
+    void parsersRejectIncompleteFencedHtmlDocuments() {
+        String incompleteHtml = "<main>partial</main>";
+        String singleFileResponse = "```html\n" + incompleteHtml + "\n```\n";
+        String multiFileResponse = completeMultiFileResponse().replace(HTML_CODE, incompleteHtml);
+
+        assertAll(
+                () -> assertThrows(
+                        IllegalArgumentException.class,
+                        () -> htmlCodeParser.parseCode(singleFileResponse)
+                ),
+                () -> assertThrows(
+                        IllegalArgumentException.class,
+                        () -> multiFileCodeParser.parseCode(multiFileResponse)
+                )
+        );
+    }
+
+    @Test
     void parseMultiFileCodeExtractsAllFencedCode() {
         MultiFileCodeResult result = multiFileCodeParser.parseCode(completeMultiFileResponse());
 

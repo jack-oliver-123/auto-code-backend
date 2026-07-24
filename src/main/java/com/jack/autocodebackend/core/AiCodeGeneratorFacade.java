@@ -9,7 +9,6 @@ import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -20,7 +19,6 @@ import java.util.function.Supplier;
 /**
  * AI 代码生成外观类，组合生成、解析和保存功能。
  */
-@Service
 public class AiCodeGeneratorFacade {
 
     private static final Logger log = LoggerFactory.getLogger(AiCodeGeneratorFacade.class);

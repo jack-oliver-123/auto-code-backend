@@ -1,6 +1,7 @@
 package com.jack.autocodebackend.core.parser;
 
 import com.jack.autocodebackend.ai.model.MultiFileCodeResult;
+import com.jack.autocodebackend.core.validator.HtmlDocumentValidator;
 
 import java.util.regex.Pattern;
 
@@ -19,6 +20,9 @@ public final class MultiFileCodeParser implements CodeParser<MultiFileCodeResult
         String htmlCode = CodeBlockExtractor.extractRequiredCodeBlock(content, HTML_CODE_PATTERN, "HTML");
         String cssCode = CodeBlockExtractor.extractRequiredCodeBlock(content, CSS_CODE_PATTERN, "CSS");
         String jsCode = CodeBlockExtractor.extractRequiredCodeBlock(content, JS_CODE_PATTERN, "JavaScript");
+        if (!HtmlDocumentValidator.isCompleteDocument(htmlCode)) {
+            throw new IllegalArgumentException("HTML 代码不是完整的 HTML 文档");
+        }
 
         MultiFileCodeResult result = new MultiFileCodeResult();
         result.setHtmlCode(htmlCode);

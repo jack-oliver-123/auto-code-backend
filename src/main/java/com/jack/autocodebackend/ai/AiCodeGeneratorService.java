@@ -3,10 +3,8 @@ package com.jack.autocodebackend.ai;
 import com.jack.autocodebackend.ai.model.HtmlCodeResult;
 import com.jack.autocodebackend.ai.model.MultiFileCodeResult;
 import dev.langchain4j.service.SystemMessage;
-import dev.langchain4j.service.spring.AiService;
 import reactor.core.publisher.Flux;
 
-@AiService
 public interface AiCodeGeneratorService {
 
     /**
@@ -15,7 +13,7 @@ public interface AiCodeGeneratorService {
      * @param userMessage 用户消息
      * @return 生成的代码结果
      */
-    @SystemMessage(fromResource = "prompt/codegen-html-system-prompt.md")
+    @SystemMessage(fromResource = "prompt/codegen-html-structured-system-prompt.md")
     HtmlCodeResult generateHtmlCode(String userMessage);
 
     /**
@@ -24,7 +22,7 @@ public interface AiCodeGeneratorService {
      * @param userMessage 用户消息
      * @return 生成的代码结果
      */
-    @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.md")
+    @SystemMessage(fromResource = "prompt/codegen-multi-file-structured-system-prompt.md")
     MultiFileCodeResult generateMultiFileCode(String userMessage);
 
     /**
