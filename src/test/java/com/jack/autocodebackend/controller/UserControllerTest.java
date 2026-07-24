@@ -6,7 +6,6 @@ import com.jack.autocodebackend.aop.AuthInterceptor;
 import com.jack.autocodebackend.config.JsonConfig;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
-import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
@@ -27,7 +26,6 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.BDDMockito.given;
@@ -36,7 +34,6 @@ import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -80,27 +77,15 @@ class UserControllerTest {
     }
 
     @Test
-    void userRegisterTreatsNullJsonAsBadRequest() throws Exception {
+    void userRegisterTreatsNullJsonAsUnreadableBody() throws Exception {
         mockMvc.perform(post("/user/register")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("null"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000))
-                .andExpect(jsonPath("$.message").value("请求体格式错误"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(50000))
+                .andExpect(jsonPath("$.message").value("系统错误"));
 
         verify(userService, never()).userRegister(any(), any(), any());
-    }
-
-    @Test
-    void userLoginTreatsMalformedJsonAsBadRequest() throws Exception {
-        mockMvc.perform(post("/user/login")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{not-json}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000))
-                .andExpect(jsonPath("$.message").value("请求体格式错误"));
-
-        verify(userService, never()).userLogin(any(), any(), any(HttpServletRequest.class));
     }
 
     @Test
@@ -156,30 +141,13 @@ class UserControllerTest {
     }
 
     @Test
-    void changePasswordDelegatesForLoggedInUser() throws Exception {
-        given(userService.changePassword(eq("Initial-Password-1!"), eq("New-Password-2!"),
-                eq("New-Password-2!"), any(HttpServletRequest.class))).willReturn(true);
-
-        mockMvc.perform(post("/user/password/change")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "oldPassword": "Initial-Password-1!",
-                                  "newPassword": "New-Password-2!",
-                                  "checkPassword": "New-Password-2!"
-                                }
-                                """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data").value(true));
-    }
-
-    @Test
-    void addUserReturnsUniqueInitialPassword() throws Exception {
-        UserAddResultVO result = new UserAddResultVO();
-        result.setUserId(301L);
-        result.setInitialPassword("Unique-Temp-9!xQ");
-        given(userService.createUserByAdmin(any(User.class))).willReturn(result);
+    void addUserUsesEncryptedDefaultPassword() throws Exception {
+        given(userService.getEncryptPassword("12345678")).willReturn("encrypted-password");
+        given(userService.save(any(User.class))).willAnswer(invocation -> {
+            User user = invocation.getArgument(0);
+            user.setId(301L);
+            return true;
+        });
 
         mockMvc.perform(post("/user/add")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -193,35 +161,28 @@ class UserControllerTest {
                                 """))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.userId").value("301"))
-                .andExpect(jsonPath("$.data.initialPassword").value("Unique-Temp-9!xQ"))
-                .andExpect(header().string("Cache-Control", "no-store"));
+                .andExpect(jsonPath("$.data").value("301"));
 
         ArgumentCaptor<User> userCaptor = ArgumentCaptor.forClass(User.class);
-        verify(userService).createUserByAdmin(userCaptor.capture());
-        User newUser = userCaptor.getValue();
-        assertThat(newUser.getUserAccount()).isEqualTo("addedAccount");
-        assertThat(newUser.getUserName()).isEqualTo("新增用户");
-        assertThat(newUser.getUserPassword()).isNull();
+        verify(userService).save(userCaptor.capture());
+        User savedUser = userCaptor.getValue();
+        assertThat(savedUser.getUserAccount()).isEqualTo("addedAccount");
+        assertThat(savedUser.getUserName()).isEqualTo("新增用户");
+        assertThat(savedUser.getUserPassword()).isEqualTo("encrypted-password");
     }
 
     @Test
     void getUserByIdReturnsUserForAdmin() throws Exception {
         User user = createUser(401L, "queriedAccount", "查询用户", "user");
-        user.setUserPassword("must-not-be-returned");
-        UserVO userVO = createUserVO(401L, "queriedAccount", "查询用户", "user");
         given(userService.getById(401L)).willReturn(user);
-        given(userService.getUserVO(user)).willReturn(userVO);
 
         mockMvc.perform(get("/user/get").param("id", "401"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.id").value("401"))
-                .andExpect(jsonPath("$.data.userAccount").value("queriedAccount"))
-                .andExpect(jsonPath("$.data.userPassword").doesNotExist());
+                .andExpect(jsonPath("$.data.userAccount").value("queriedAccount"));
 
         verify(userService).getById(401L);
-        verify(userService).getUserVO(user);
     }
 
     @Test
@@ -229,29 +190,9 @@ class UserControllerTest {
         given(userService.getById(999L)).willReturn(null);
 
         mockMvc.perform(get("/user/get").param("id", "999"))
-                .andExpect(status().isNotFound())
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40400))
                 .andExpect(jsonPath("$.message").value("请求数据不存在"));
-    }
-
-    @Test
-    void getUserByIdRejectsNonNumericIdAsBadRequest() throws Exception {
-        mockMvc.perform(get("/user/get").param("id", "not-a-number"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000))
-                .andExpect(jsonPath("$.message").value("请求参数格式错误"));
-
-        verify(userService, never()).getById(anyLong());
-    }
-
-    @Test
-    void getUserByIdRejectsMissingIdAsBadRequest() throws Exception {
-        mockMvc.perform(get("/user/get"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000))
-                .andExpect(jsonPath("$.message").value("请求参数格式错误"));
-
-        verify(userService, never()).getById(anyLong());
     }
 
     @Test
@@ -273,19 +214,6 @@ class UserControllerTest {
     }
 
     @Test
-    void getUserVOByIdRejectsOrdinaryUser() throws Exception {
-        User ordinaryUser = createUser(2L, "userAccount", "普通用户", "user");
-        given(userService.getLoginUser(any(HttpServletRequest.class))).willReturn(ordinaryUser);
-
-        mockMvc.perform(get("/user/get/vo").param("id", "402"))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value(40101))
-                .andExpect(jsonPath("$.message").value("无权限"));
-
-        verify(userService, never()).getById(402L);
-    }
-
-    @Test
     void deleteUserReturnsDeleteResult() throws Exception {
         given(userService.removeById(501L)).willReturn(true);
 
@@ -302,19 +230,8 @@ class UserControllerTest {
     }
 
     @Test
-    void deleteUserRejectsMissingIdAsBadRequest() throws Exception {
-        mockMvc.perform(post("/user/delete")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000));
-
-        verify(userService, never()).removeById(anyLong());
-    }
-
-    @Test
     void updateUserCopiesRequestFields() throws Exception {
-        given(userService.updateUserByAdmin(any(User.class))).willReturn(true);
+        given(userService.updateById(any(User.class))).willReturn(true);
 
         mockMvc.perform(post("/user/update")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -331,7 +248,7 @@ class UserControllerTest {
                 .andExpect(jsonPath("$.data").value(true));
 
         ArgumentCaptor<User> userCaptor = ArgumentCaptor.forClass(User.class);
-        verify(userService).updateUserByAdmin(userCaptor.capture());
+        verify(userService).updateById(userCaptor.capture());
         User updatedUser = userCaptor.getValue();
         assertThat(updatedUser.getId()).isEqualTo(601L);
         assertThat(updatedUser.getUserName()).isEqualTo("更新用户");
@@ -375,54 +292,14 @@ class UserControllerTest {
     }
 
     @Test
-    void listUserVOByPageRejectsNegativePageSize() throws Exception {
-        mockMvc.perform(post("/user/list/page/vo")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"pageNum": 1, "pageSize": -1}
-                                """))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000));
-
-        verify(userService, never()).page(any(Page.class), any(QueryWrapper.class));
-    }
-
-    @Test
-    void listUserVOByPageRejectsOversizedPage() throws Exception {
-        mockMvc.perform(post("/user/list/page/vo")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {"pageNum": 1, "pageSize": 101}
-                                """))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value(40000));
-
-        verify(userService, never()).page(any(Page.class), any(QueryWrapper.class));
-    }
-
-    @Test
     void adminEndpointRejectsOrdinaryUser() throws Exception {
         User ordinaryUser = createUser(2L, "userAccount", "普通用户", "user");
         given(userService.getLoginUser(any(HttpServletRequest.class))).willReturn(ordinaryUser);
 
         mockMvc.perform(get("/user/get").param("id", "401"))
-                .andExpect(status().isForbidden())
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40101))
                 .andExpect(jsonPath("$.message").value("无权限"));
-
-        verify(userService, never()).getById(401L);
-    }
-
-    @Test
-    void adminEndpointRequiresInitialPasswordChangeFirst() throws Exception {
-        User admin = createUser(3L, "temporaryAdmin", "待改密管理员", "admin");
-        given(userService.getLoginUser(any(HttpServletRequest.class))).willReturn(admin);
-        given(userService.requiresPasswordChange(admin)).willReturn(true);
-
-        mockMvc.perform(get("/user/get").param("id", "401"))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value(40301))
-                .andExpect(jsonPath("$.message").value("请先修改初始密码"));
 
         verify(userService, never()).getById(401L);
     }

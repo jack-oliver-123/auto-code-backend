@@ -11,13 +11,11 @@ import com.jack.autocodebackend.exception.ErrorCode;
 import com.jack.autocodebackend.exception.ThrowUtils;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.*;
-import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
 import com.jack.autocodebackend.model.vo.UserVO;
 import com.jack.autocodebackend.service.UserService;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.BeanUtils;
 import org.springframework.web.bind.annotation.*;
 
@@ -26,9 +24,6 @@ import java.util.List;
 @RestController
 @RequestMapping("/user")
 public class UserController {
-
-    private static final long MAX_PAGE_SIZE = 100;
-
     @Resource
     private UserService userService;
 
@@ -68,32 +63,21 @@ public class UserController {
     }
 
     /**
-     * 修改当前用户密码。该接口必须允许待修改初始密码的用户访问。
-     */
-    @PostMapping("/password/change")
-    public BaseResponse<Boolean> changePassword(@RequestBody UserPasswordChangeDTO passwordChangeRequest,
-                                                HttpServletRequest request) {
-        ThrowUtils.throwIf(passwordChangeRequest == null, ErrorCode.PARAMS_ERROR);
-        boolean result = userService.changePassword(
-                passwordChangeRequest.getOldPassword(),
-                passwordChangeRequest.getNewPassword(),
-                passwordChangeRequest.getCheckPassword(),
-                request);
-        return ResultUtils.success(result);
-    }
-
-    /**
      * 创建用户
      */
     @PostMapping("/add")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<UserAddResultVO> addUser(@RequestBody UserAddDTO userAddRequest,
-                                                HttpServletResponse response) {
+    public BaseResponse<Long> addUser(@RequestBody UserAddDTO userAddRequest) {
         ThrowUtils.throwIf(userAddRequest == null, ErrorCode.PARAMS_ERROR);
         User user = new User();
         BeanUtils.copyProperties(userAddRequest, user);
-        response.setHeader("Cache-Control", "no-store");
-        return ResultUtils.success(userService.createUserByAdmin(user));
+        // 默认密码 12345678
+        final String DEFAULT_PASSWORD = "12345678";
+        String encryptPassword = userService.getEncryptPassword(DEFAULT_PASSWORD);
+        user.setUserPassword(encryptPassword);
+        boolean result = userService.save(user);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+        return ResultUtils.success(user.getId());
     }
 
     /**
@@ -101,22 +85,20 @@ public class UserController {
      */
     @GetMapping("/get")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<UserVO> getUserById(@RequestParam Long id) {
-        ThrowUtils.throwIf(id == null || id <= 0, ErrorCode.PARAMS_ERROR);
+    public BaseResponse<User> getUserById(long id) {
+        ThrowUtils.throwIf(id <= 0, ErrorCode.PARAMS_ERROR);
         User user = userService.getById(id);
         ThrowUtils.throwIf(user == null, ErrorCode.NOT_FOUND_ERROR);
-        return ResultUtils.success(userService.getUserVO(user));
+        return ResultUtils.success(user);
     }
 
     /**
      * 根据 id 获取包装类
      */
     @GetMapping("/get/vo")
-    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<UserVO> getUserVOById(@RequestParam Long id) {
-        ThrowUtils.throwIf(id == null || id <= 0, ErrorCode.PARAMS_ERROR);
-        User user = userService.getById(id);
-        ThrowUtils.throwIf(user == null, ErrorCode.NOT_FOUND_ERROR);
+    public BaseResponse<UserVO> getUserVOById(long id) {
+        BaseResponse<User> response = getUserById(id);
+        User user = response.getData();
         return ResultUtils.success(userService.getUserVO(user));
     }
 
@@ -126,7 +108,7 @@ public class UserController {
     @PostMapping("/delete")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
     public BaseResponse<Boolean> deleteUser(@RequestBody DeleteRequest deleteRequest) {
-        if (deleteRequest == null || deleteRequest.getId() == null || deleteRequest.getId() <= 0) {
+        if (deleteRequest == null || deleteRequest.getId() <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         boolean b = userService.removeById(deleteRequest.getId());
@@ -139,14 +121,12 @@ public class UserController {
     @PostMapping("/update")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
     public BaseResponse<Boolean> updateUser(@RequestBody UserUpdateDTO userUpdateRequest) {
-        if (userUpdateRequest == null
-                || userUpdateRequest.getId() == null
-                || userUpdateRequest.getId() <= 0) {
+        if (userUpdateRequest == null || userUpdateRequest.getId() == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         User user = new User();
         BeanUtils.copyProperties(userUpdateRequest, user);
-        boolean result = userService.updateUserByAdmin(user);
+        boolean result = userService.updateById(user);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
         return ResultUtils.success(true);
     }
@@ -162,8 +142,6 @@ public class UserController {
         ThrowUtils.throwIf(userQueryRequest == null, ErrorCode.PARAMS_ERROR);
         long current = userQueryRequest.getPageNum();
         long pageSize = userQueryRequest.getPageSize();
-        ThrowUtils.throwIf(current < 1 || pageSize < 1 || pageSize > MAX_PAGE_SIZE,
-                ErrorCode.PARAMS_ERROR, "分页参数不合法");
         Page<User> userPage = userService.page(new Page<>(current, pageSize),
                 userService.getQueryWrapper(userQueryRequest));
         Page<UserVO> userVOPage = new Page<>(current, pageSize, userPage.getTotal());
