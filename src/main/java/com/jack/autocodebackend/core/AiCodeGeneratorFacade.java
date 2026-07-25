@@ -4,6 +4,7 @@ import com.jack.autocodebackend.ai.AiCodeGeneratorService;
 import com.jack.autocodebackend.ai.model.CodeResult;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.core.parser.CodeParserExecutor;
+import com.jack.autocodebackend.core.saver.CodeFilePublication;
 import com.jack.autocodebackend.core.saver.CodeFileSaverExecutor;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
@@ -34,15 +35,17 @@ public class AiCodeGeneratorFacade {
      *
      * @param userMessage     用户提示词
      * @param codeGenTypeEnum 生成类型
+     * @param appId           应用 ID
      * @return 保存的目录
      */
-    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum) {
+    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum, Long appId) {
         requireCodeGenType(codeGenTypeEnum);
+        requireAppId(appId);
         CodeResult result = switch (codeGenTypeEnum) {
             case HTML -> aiCodeGeneratorService.generateHtmlCode(userMessage);
             case MULTI_FILE -> aiCodeGeneratorService.generateMultiFileCode(userMessage);
         };
-        return CodeFileSaverExecutor.executeSaver(result);
+        return CodeFileSaverExecutor.executeSaver(result, appId);
     }
 
     /**
@@ -51,33 +54,69 @@ public class AiCodeGeneratorFacade {
      *
      * @param userMessage     用户提示词
      * @param codeGenTypeEnum 生成类型
+     * @param appId           应用 ID
      * @return AI 原始代码流
      */
-    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum) {
+    public Flux<String> generateAndSaveCodeStream(
+            String userMessage,
+            CodeGenTypeEnum codeGenTypeEnum,
+            Long appId
+    ) {
         requireCodeGenType(codeGenTypeEnum);
-        return switch (codeGenTypeEnum) {
+        requireAppId(appId);
+        return Flux.defer(() -> {
+            CodeGenerationSession session = startCodeGeneration(
+                    userMessage, codeGenTypeEnum, appId);
+            return Flux.using(
+                    () -> session,
+                    activeSession -> activeSession.stream().concatWith(Flux.defer(() -> {
+                        activeSession.commit();
+                        return Flux.empty();
+                    })),
+                    CodeGenerationSession::rollback
+            );
+        });
+    }
+
+    public CodeGenerationSession startCodeGeneration(
+            String userMessage,
+            CodeGenTypeEnum codeGenTypeEnum,
+            Long appId
+    ) {
+        requireCodeGenType(codeGenTypeEnum);
+        requireAppId(appId);
+        CodeGenerationSession session = new CodeGenerationSession();
+        Flux<String> stream = switch (codeGenTypeEnum) {
             case HTML -> processCodeStream(
                     () -> aiCodeGeneratorService.generateHtmlCodeStream(userMessage),
-                    CodeGenTypeEnum.HTML
+                    CodeGenTypeEnum.HTML,
+                    appId,
+                    session
             );
             case MULTI_FILE -> processCodeStream(
                     () -> aiCodeGeneratorService.generateMultiFileCodeStream(userMessage),
-                    CodeGenTypeEnum.MULTI_FILE
+                    CodeGenTypeEnum.MULTI_FILE,
+                    appId,
+                    session
             );
         };
+        session.initialize(stream);
+        return session;
     }
 
-    public File generateAndSaveHtmlCode(String userMessage) {
-        return generateAndSaveCode(userMessage, CodeGenTypeEnum.HTML);
+    public File generateAndSaveHtmlCode(String userMessage, Long appId) {
+        return generateAndSaveCode(userMessage, CodeGenTypeEnum.HTML, appId);
     }
 
-    public File generateAndSaveMultiFileCode(String userMessage) {
-        return generateAndSaveCode(userMessage, CodeGenTypeEnum.MULTI_FILE);
+    public File generateAndSaveMultiFileCode(String userMessage, Long appId) {
+        return generateAndSaveCode(userMessage, CodeGenTypeEnum.MULTI_FILE, appId);
     }
 
     private Flux<String> processCodeStream(
             Supplier<Flux<String>> codeStreamSupplier,
-            CodeGenTypeEnum codeGenType
+            CodeGenTypeEnum codeGenType,
+            Long appId,
+            CodeGenerationSession session
     ) {
         return Flux.defer(() -> {
             Flux<String> codeStream = codeStreamSupplier.get();
@@ -86,9 +125,13 @@ public class AiCodeGeneratorFacade {
             }
 
             StringBuilder codeBuilder = new StringBuilder();
-            Flux<String> saveStage = Mono.fromCallable(() -> parseAndSaveCode(codeBuilder.toString(), codeGenType))
+            Flux<String> saveStage = Mono.fromCallable(
+                            () -> parsePublishAndAttach(
+                                    codeBuilder.toString(), codeGenType, appId, session)
+                    )
                     .subscribeOn(Schedulers.boundedElastic())
-                    .doOnNext(savedDir -> log.info("代码保存成功，路径：{}", savedDir.getAbsolutePath()))
+                    .doOnNext(savedDirectory -> log.info(
+                            "代码保存成功，路径：{}", savedDirectory.getAbsolutePath()))
                     .thenMany(Flux.<String>empty());
 
             return codeStream
@@ -97,14 +140,35 @@ public class AiCodeGeneratorFacade {
         });
     }
 
-    private File parseAndSaveCode(String completeCode, CodeGenTypeEnum codeGenType) {
+    private CodeFilePublication parseAndPublishCode(
+            String completeCode,
+            CodeGenTypeEnum codeGenType,
+            Long appId
+    ) {
         CodeResult parsedResult = CodeParserExecutor.executeParser(completeCode, codeGenType);
-        return CodeFileSaverExecutor.executeSaver(parsedResult);
+        return CodeFileSaverExecutor.executeSaverPublication(parsedResult, appId);
+    }
+
+    private File parsePublishAndAttach(
+            String completeCode,
+            CodeGenTypeEnum codeGenType,
+            Long appId,
+            CodeGenerationSession session
+    ) {
+        CodeFilePublication publication = parseAndPublishCode(completeCode, codeGenType, appId);
+        session.attach(publication);
+        return publication.directory();
     }
 
     private void requireCodeGenType(CodeGenTypeEnum codeGenType) {
         if (codeGenType == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "生成类型为空");
+        }
+    }
+
+    private void requireAppId(Long appId) {
+        if (appId == null || appId <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "应用 ID 必须为正数");
         }
     }
 }

@@ -3,6 +3,9 @@ spring:
     active: local
   application:
     name: auto-code-backend
+  web:
+    error:
+      include-stacktrace: never
   datasource:
     url: ${DB_URL:jdbc:mysql://localhost:3306/auto_code?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
     username: ${DB_USERNAME:root}
@@ -12,12 +15,22 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: false
 app:
+  deployment:
+    root-dir: ${APP_DEPLOY_ROOT_DIR:tmp/code_deploy}
+    host: ${APP_DEPLOY_HOST:http://localhost:9332}
+    local-server:
+      enabled: ${APP_DEPLOY_LOCAL_SERVER_ENABLED:true}
+      bind-address: ${APP_DEPLOY_LOCAL_SERVER_BIND_ADDRESS:127.0.0.1}
+      port: ${APP_DEPLOY_LOCAL_SERVER_PORT:9332}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
 server:
   port: 9321
   servlet:
     context-path: /api
+    session:
+      cookie:
+        path: /api
 # springdoc-openapi项目配置
 springdoc:
   group-configs:

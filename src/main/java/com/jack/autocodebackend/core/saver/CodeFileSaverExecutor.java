@@ -20,15 +20,21 @@ public final class CodeFileSaverExecutor {
     private CodeFileSaverExecutor() {
     }
 
-    public static File executeSaver(CodeResult codeResult) {
+    public static File executeSaver(CodeResult codeResult, Long appId) {
+        CodeFilePublication publication = executeSaverPublication(codeResult, appId);
+        publication.commit();
+        return publication.directory();
+    }
+
+    public static CodeFilePublication executeSaverPublication(CodeResult codeResult, Long appId) {
         if (codeResult == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "代码结果对象不能为空");
         }
         if (codeResult instanceof HtmlCodeResult htmlCodeResult) {
-            return HTML_CODE_FILE_SAVER.saveCode(htmlCodeResult);
+            return HTML_CODE_FILE_SAVER.publishCode(htmlCodeResult, appId);
         }
         if (codeResult instanceof MultiFileCodeResult multiFileCodeResult) {
-            return MULTI_FILE_CODE_FILE_SAVER.saveCode(multiFileCodeResult);
+            return MULTI_FILE_CODE_FILE_SAVER.publishCode(multiFileCodeResult, appId);
         }
         throw new BusinessException(
                 ErrorCode.SYSTEM_ERROR,

@@ -5,6 +5,7 @@ import com.jack.autocodebackend.common.ResultUtils;
 import io.swagger.v3.oas.annotations.Hidden;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -21,6 +22,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<BaseResponse<?>> businessExceptionHandler(BusinessException e) {
         log.warn("BusinessException code={}, message={}", e.getCode(), e.getMessage());
         return ResponseEntity.status(resolveStatus(e.getCode()))
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(ResultUtils.error(e.getCode(), e.getMessage()));
     }
 
@@ -29,6 +31,7 @@ public class GlobalExceptionHandler {
             HttpMessageNotReadableException e) {
         log.warn("Unreadable request body");
         return ResponseEntity.badRequest()
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(ResultUtils.error(ErrorCode.PARAMS_ERROR, "请求体格式错误"));
     }
 
@@ -37,6 +40,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<BaseResponse<?>> invalidRequestParameterHandler(Exception e) {
         log.warn("Invalid request parameter");
         return ResponseEntity.badRequest()
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(ResultUtils.error(ErrorCode.PARAMS_ERROR, "请求参数格式错误"));
     }
 
@@ -44,6 +48,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<BaseResponse<?>> runtimeExceptionHandler(RuntimeException e) {
         log.error("RuntimeException", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(ResultUtils.error(ErrorCode.SYSTEM_ERROR, "系统错误"));
     }
 
