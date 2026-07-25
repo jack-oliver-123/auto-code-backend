@@ -43,7 +43,11 @@ class AppDeploymentLocalServerTest {
 
     private static final Pattern PREVIEW_TOKEN_PATTERN = Pattern.compile("[A-Za-z0-9_-]{43}");
 
-    private static final String INDEX = "<!doctype html><link rel=\"stylesheet\" href=\"style.css\">";
+    private static final String INDEX = "<!doctype html><html><head>"
+            + "<link rel=\"stylesheet\" href=\"style.css\">"
+            + "</head><body><h1>Preview</h1>"
+            + "<script src=\"script.js\"></script>"
+            + "</body></html>";
 
     private static final String STYLE = "body { color: #123456; }";
 
@@ -208,7 +212,7 @@ class AppDeploymentLocalServerTest {
 
     @Test
     void issuesPreviewAndServesItsEntryPointAndAssetsOverRealHttp() throws Exception {
-        createPreviewFixture(CodeGenTypeEnum.MULTI_FILE, PREVIEW_APP_ID);
+        Path source = createPreviewFixture(CodeGenTypeEnum.MULTI_FILE, PREVIEW_APP_ID);
         startServer();
 
         AppDeploymentLocalServer.PreviewAccess access = localServer.issuePreview(
@@ -248,7 +252,9 @@ class AppDeploymentLocalServerTest {
                 session.cookiePair()
         );
         assertEquals(200, index.statusCode());
-        assertEquals(INDEX, new String(index.body(), StandardCharsets.UTF_8));
+        String bundledIndex = new String(index.body(), StandardCharsets.UTF_8);
+        assertBundledPreview(bundledIndex, "<h1>Preview</h1>");
+        assertEquals(INDEX, Files.readString(source.resolve("index.html"), StandardCharsets.UTF_8));
         assertEquals(
                 "text/html; charset=UTF-8",
                 index.headers().firstValue("Content-Type").orElseThrow()
@@ -276,7 +282,7 @@ class AppDeploymentLocalServerTest {
         assertEquals(200, head.statusCode());
         assertEquals(0, head.body().length);
         assertEquals(
-                Integer.toString(INDEX.getBytes(StandardCharsets.UTF_8).length),
+                Integer.toString(bundledIndex.getBytes(StandardCharsets.UTF_8).length),
                 head.headers().firstValue("Content-Length").orElseThrow()
         );
     }
@@ -293,14 +299,12 @@ class AppDeploymentLocalServerTest {
         PreviewSession firstSession = bootstrap(first);
         Path firstSnapshot = previewSnapshotRoot.resolve(firstSession.publicId());
         assertTrue(Files.isDirectory(firstSnapshot));
-        assertEquals(
-                INDEX,
-                new String(requestWithCookie(
-                        "GET",
-                        firstSession.contentRoot(),
-                        firstSession.cookiePair()
-                ).body(), StandardCharsets.UTF_8)
-        );
+        String firstBundledIndex = new String(requestWithCookie(
+                "GET",
+                firstSession.contentRoot(),
+                firstSession.cookiePair()
+        ).body(), StandardCharsets.UTF_8);
+        assertBundledPreview(firstBundledIndex, "<h1>Preview</h1>");
 
         String indexV2 = "<!doctype html><h1>version two</h1>";
         Files.writeString(source.resolve("index.html"), indexV2, StandardCharsets.UTF_8);
@@ -311,7 +315,7 @@ class AppDeploymentLocalServerTest {
         );
         assertTrue(Files.isDirectory(firstSnapshot));
         assertEquals(
-                INDEX,
+                firstBundledIndex,
                 new String(requestWithCookie(
                         "GET",
                         firstSession.contentRoot(),
@@ -337,14 +341,12 @@ class AppDeploymentLocalServerTest {
                 ).statusCode()
         );
         assertFalse(Files.exists(firstSnapshot));
-        assertEquals(
-                indexV2,
-                new String(requestWithCookie(
-                        "GET",
-                        secondSession.contentRoot(),
-                        secondSession.cookiePair()
-                ).body(), StandardCharsets.UTF_8)
-        );
+        String secondBundledIndex = new String(requestWithCookie(
+                "GET",
+                secondSession.contentRoot(),
+                secondSession.cookiePair()
+        ).body(), StandardCharsets.UTF_8);
+        assertBundledPreview(secondBundledIndex, indexV2);
     }
 
     @Test
@@ -648,6 +650,16 @@ class AppDeploymentLocalServerTest {
             Files.writeString(previewDirectory.resolve("script.js"), SCRIPT, StandardCharsets.UTF_8);
         }
         return previewDirectory;
+    }
+
+    private static void assertBundledPreview(String html, String expectedContent) {
+        assertTrue(html.contains(expectedContent));
+        assertTrue(html.contains("<style data-auto-code-preview>"));
+        assertTrue(html.contains(STYLE));
+        assertTrue(html.contains("<script data-auto-code-preview>"));
+        assertTrue(html.contains(SCRIPT));
+        assertFalse(html.contains("href=\"style.css\""));
+        assertFalse(html.contains("src=\"script.js\""));
     }
 
     private static String previewToken(AppDeploymentLocalServer.PreviewAccess access) {

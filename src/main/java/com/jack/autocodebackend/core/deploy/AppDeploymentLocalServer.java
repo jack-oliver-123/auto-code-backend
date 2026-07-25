@@ -643,6 +643,9 @@ public final class AppDeploymentLocalServer implements DisposableBean {
             fileOperations.validateRegularTree(staging);
             validatePreviewTree(staging);
             validateRequiredPreviewFiles(staging, type);
+            if (type == CodeGenTypeEnum.MULTI_FILE) {
+                PreviewSnapshotBundler.bundle(staging);
+            }
 
             Path target = previewSnapshotRoot.resolve(publicId).normalize();
             requireDirectPreviewRootChild(target);
