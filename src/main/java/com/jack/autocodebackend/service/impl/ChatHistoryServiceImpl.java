@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
+import com.jack.autocodebackend.config.AppChatMemoryProperties;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 import com.jack.autocodebackend.mapper.AppMapper;
@@ -207,6 +208,34 @@ public class ChatHistoryServiceImpl
             baseMapper.delete(deleteWrapper);
         } catch (RuntimeException exception) {
             throw operationFailure("删除对话历史失败", exception);
+        }
+    }
+
+    @Override
+    public List<ChatHistory> listLatestForMemory(Long appId, Long beforeId, int limit) {
+        validatePositiveId(appId, "应用 id 不合法");
+        if (beforeId != null) {
+            validatePositiveId(beforeId, "历史记录游标不合法");
+        }
+        if (limit <= 0 || limit > AppChatMemoryProperties.MAX_HISTORY_LIMIT) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "历史记录数量不合法");
+        }
+        QueryWrapper<ChatHistory> queryWrapper = new QueryWrapper<>();
+        queryWrapper.eq("appId", appId)
+                .lt(beforeId != null, "id", beforeId)
+                .orderByDesc("id");
+        try {
+            Page<ChatHistory> selectedPage = this.page(
+                    new Page<>(1, limit, false), queryWrapper);
+            if (selectedPage == null || selectedPage.getRecords() == null) {
+                throw new BusinessException(
+                        ErrorCode.SYSTEM_ERROR, "查询对话记忆失败");
+            }
+            return List.copyOf(selectedPage.getRecords());
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw operationFailure("查询对话记忆失败", exception);
         }
     }
 

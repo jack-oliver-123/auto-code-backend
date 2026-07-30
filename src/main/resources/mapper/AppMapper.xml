@@ -10,6 +10,12 @@
             <result property="cover" column="cover" />
             <result property="initPrompt" column="initPrompt" />
             <result property="codeGenType" column="codeGenType" />
+            <result property="generationStatus" column="generationStatus" />
+            <result property="generationAttemptId" column="generationAttemptId" />
+            <result property="generationFailureCode" column="generationFailureCode" />
+            <result property="generationFailureMessage" column="generationFailureMessage" />
+            <result property="generationStartedTime" column="generationStartedTime" />
+            <result property="generationFinishedTime" column="generationFinishedTime" />
             <result property="deployKey" column="deployKey" />
             <result property="deployedTime" column="deployedTime" />
             <result property="priority" column="priority" />
@@ -21,7 +27,57 @@
     </resultMap>
 
     <sql id="Base_Column_List">
-        id,appName,cover,initPrompt,codeGenType,deployKey,deployedTime,
+        id,appName,cover,initPrompt,codeGenType,generationStatus,generationAttemptId,
+        generationFailureCode,generationFailureMessage,generationStartedTime,
+        generationFinishedTime,deployKey,deployedTime,
         priority,userId,editTime,createTime,updateTime,isDelete
     </sql>
+
+    <update id="startGenerationAttempt">
+        UPDATE app
+        SET generationStatus = 'GENERATING',
+            generationAttemptId = #{attemptId},
+            generationFailureCode = NULL,
+            generationFailureMessage = NULL,
+            generationStartedTime = #{startedTime},
+            generationFinishedTime = NULL
+        WHERE id = #{appId}
+          AND userId = #{userId}
+          AND generationStatus = #{expectedStatus}
+        <choose>
+            <when test="expectedAttemptId == null">
+                AND generationAttemptId IS NULL
+            </when>
+            <otherwise>
+                AND generationAttemptId = #{expectedAttemptId}
+            </otherwise>
+        </choose>
+          AND isDelete = 0
+    </update>
+
+    <update id="completeGenerationAttempt">
+        UPDATE app
+        SET generationStatus = 'SUCCEEDED',
+            generationFailureCode = NULL,
+            generationFailureMessage = NULL,
+            generationFinishedTime = #{finishedTime}
+        WHERE id = #{appId}
+          AND userId = #{userId}
+          AND generationAttemptId = #{attemptId}
+          AND generationStatus = 'GENERATING'
+          AND isDelete = 0
+    </update>
+
+    <update id="failGenerationAttempt">
+        UPDATE app
+        SET generationStatus = 'FAILED',
+            generationFailureCode = #{failureCode},
+            generationFailureMessage = #{failureMessage},
+            generationFinishedTime = #{finishedTime}
+        WHERE id = #{appId}
+          AND userId = #{userId}
+          AND generationAttemptId = #{attemptId}
+          AND generationStatus = 'GENERATING'
+          AND isDelete = 0
+    </update>
 </mapper>

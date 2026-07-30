@@ -3,9 +3,11 @@ package com.jack.autocodebackend.core;
 import com.jack.autocodebackend.ai.AiCodeGeneratorService;
 import com.jack.autocodebackend.ai.model.CodeResult;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
+import com.jack.autocodebackend.config.AppVueProjectProperties;
 import com.jack.autocodebackend.core.parser.CodeParserExecutor;
+import com.jack.autocodebackend.core.parser.VueProjectCodeParser;
 import com.jack.autocodebackend.core.saver.CodeFilePublication;
-import com.jack.autocodebackend.core.saver.CodeFileSaverExecutor;
+import com.jack.autocodebackend.core.saver.CodeFileSaverRegistry;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 import org.slf4j.Logger;
@@ -22,12 +24,48 @@ import java.util.function.Supplier;
  */
 public class AiCodeGeneratorFacade {
 
+    /**
+     * The AI stream completed, but its content was not a valid generated-code response.
+     */
+    public static final class CodeResponseFormatException extends IllegalArgumentException {
+
+        private final boolean ordinaryConversationCandidate;
+
+        public CodeResponseFormatException(IllegalArgumentException cause) {
+            super(cause.getMessage(), cause);
+            ordinaryConversationCandidate =
+                    cause instanceof VueProjectCodeParser.NoProjectEnvelopeException;
+        }
+
+        public boolean isOrdinaryConversationCandidate() {
+            return ordinaryConversationCandidate;
+        }
+    }
+
     private static final Logger log = LoggerFactory.getLogger(AiCodeGeneratorFacade.class);
 
     private final AiCodeGeneratorService aiCodeGeneratorService;
 
+    private final CodeFileSaverRegistry saverRegistry;
+
+    private final int vueResponseMaxChars;
+
     public AiCodeGeneratorFacade(AiCodeGeneratorService aiCodeGeneratorService) {
+        this(
+                aiCodeGeneratorService,
+                CodeFileSaverRegistry.legacy(),
+                AppVueProjectProperties.defaults()
+        );
+    }
+
+    public AiCodeGeneratorFacade(
+            AiCodeGeneratorService aiCodeGeneratorService,
+            CodeFileSaverRegistry saverRegistry,
+            AppVueProjectProperties vueProjectProperties
+    ) {
         this.aiCodeGeneratorService = aiCodeGeneratorService;
+        this.saverRegistry = saverRegistry;
+        this.vueResponseMaxChars = vueProjectProperties.getResponseMaxChars();
     }
 
     /**
@@ -44,8 +82,11 @@ public class AiCodeGeneratorFacade {
         CodeResult result = switch (codeGenTypeEnum) {
             case HTML -> aiCodeGeneratorService.generateHtmlCode(userMessage);
             case MULTI_FILE -> aiCodeGeneratorService.generateMultiFileCode(userMessage);
+            case VUE_PROJECT -> aiCodeGeneratorService.generateVueProjectCode(userMessage);
         };
-        return CodeFileSaverExecutor.executeSaver(result, appId);
+        CodeFilePublication publication = saverRegistry.publish(result, codeGenTypeEnum, appId);
+        publication.commit();
+        return publication.directory();
     }
 
     /**
@@ -99,6 +140,12 @@ public class AiCodeGeneratorFacade {
                     appId,
                     session
             );
+            case VUE_PROJECT -> processCodeStream(
+                    () -> aiCodeGeneratorService.generateVueProjectCodeStream(userMessage),
+                    CodeGenTypeEnum.VUE_PROJECT,
+                    appId,
+                    session
+            );
         };
         session.initialize(stream);
         return session;
@@ -110,6 +157,10 @@ public class AiCodeGeneratorFacade {
 
     public File generateAndSaveMultiFileCode(String userMessage, Long appId) {
         return generateAndSaveCode(userMessage, CodeGenTypeEnum.MULTI_FILE, appId);
+    }
+
+    public File generateAndSaveVueProjectCode(String userMessage, Long appId) {
+        return generateAndSaveCode(userMessage, CodeGenTypeEnum.VUE_PROJECT, appId);
     }
 
     private Flux<String> processCodeStream(
@@ -135,7 +186,7 @@ public class AiCodeGeneratorFacade {
                     .thenMany(Flux.<String>empty());
 
             return codeStream
-                    .doOnNext(codeBuilder::append)
+                    .doOnNext(chunk -> appendResponseChunk(codeBuilder, chunk, codeGenType))
                     .concatWith(saveStage);
         });
     }
@@ -145,8 +196,13 @@ public class AiCodeGeneratorFacade {
             CodeGenTypeEnum codeGenType,
             Long appId
     ) {
-        CodeResult parsedResult = CodeParserExecutor.executeParser(completeCode, codeGenType);
-        return CodeFileSaverExecutor.executeSaverPublication(parsedResult, appId);
+        CodeResult parsedResult;
+        try {
+            parsedResult = CodeParserExecutor.executeParser(completeCode, codeGenType);
+        } catch (IllegalArgumentException parseFailure) {
+            throw new CodeResponseFormatException(parseFailure);
+        }
+        return saverRegistry.publish(parsedResult, codeGenType, appId);
     }
 
     private File parsePublishAndAttach(
@@ -158,6 +214,21 @@ public class AiCodeGeneratorFacade {
         CodeFilePublication publication = parseAndPublishCode(completeCode, codeGenType, appId);
         session.attach(publication);
         return publication.directory();
+    }
+
+    private void appendResponseChunk(
+            StringBuilder response,
+            String chunk,
+            CodeGenTypeEnum codeGenType
+    ) {
+        if (codeGenType == CodeGenTypeEnum.VUE_PROJECT
+                && chunk.length() > vueResponseMaxChars - response.length()) {
+            throw new BusinessException(
+                    ErrorCode.OPERATION_ERROR,
+                    "Vue project response exceeds its configured limit"
+            );
+        }
+        response.append(chunk);
     }
 
     private void requireCodeGenType(CodeGenTypeEnum codeGenType) {

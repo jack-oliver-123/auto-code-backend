@@ -36,7 +36,7 @@ import java.util.regex.Pattern;
 public class AppPreviewRedirectController {
 
     private static final Pattern CODE_OUTPUT_DIRECTORY_PATTERN =
-            Pattern.compile("^(?:html|multi_file)_([1-9]\\d*)$");
+            Pattern.compile("^(?:html|multi_file|vue_project)_([1-9]\\d*)$");
 
     private final AppService appService;
 

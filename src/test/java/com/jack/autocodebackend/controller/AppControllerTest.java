@@ -142,6 +142,7 @@ class AppControllerTest {
         given(appService.chatToGenCode(401L, " refine layout ", loginUser))
                 .willReturn(Flux.just(
                         new AppGenerationEvent.Content("  <main>\n"),
+                        new AppGenerationEvent.Heartbeat(),
                         new AppGenerationEvent.Content("tail  "),
                         new AppGenerationEvent.Completed(preview)
                 ));
@@ -165,6 +166,7 @@ class AppControllerTest {
         assertThat(responseBody)
                 .contains("{\"d\":\"  <main>\\n\"}")
                 .contains("{\"d\":\"tail  \"}")
+                .contains(":keep-alive")
                 .contains("event:done")
                 .contains("\"previewUrl\":\"http://127.0.0.1:9332/preview/generated-token/\"")
                 .contains("\"expiresAt\":1753405723000")
@@ -241,10 +243,98 @@ class AppControllerTest {
         assertThat(signals)
                 .filteredOn(Signal::isOnNext)
                 .extracting(signal -> signal.get().event())
+                .containsExactly(null, "error")
                 .doesNotContain("done");
         assertThat(signals.getFirst().get().data()).isEqualTo("{\"d\":\"partial\"}");
-        assertThat(signals.getLast().isOnError()).isTrue();
-        assertThat(signals.getLast().getThrowable()).isSameAs(failure);
+        ServerSentEvent<String> errorEvent = signals.stream()
+                .filter(Signal::isOnNext)
+                .map(Signal::get)
+                .filter(event -> "error".equals(event.event()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(errorEvent.data())
+                .contains("\"code\":50001", "\"status\":\"FAILED\"");
+        assertThat(signals.getLast().isOnComplete()).isTrue();
+    }
+
+    @Test
+    void chatToGenCodeSerializesServiceFailureAsOneNamedSseError() throws Exception {
+        given(appService.chatToGenCode(404L, "continue", loginUser))
+                .willReturn(Flux.just(
+                        new AppGenerationEvent.Content(" partial\n"),
+                        new AppGenerationEvent.Failed(
+                                ErrorCode.OPERATION_ERROR.getCode(),
+                                "生成失败，请稍后重试",
+                                "FAILED"
+                        )
+                ));
+
+        MvcResult streamingResult = mockMvc.perform(post("/app/chat/gen/code")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"appId": 404, "message": "continue"}
+                                """)
+                        .accept(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        MvcResult completedResult = mockMvc.perform(asyncDispatch(streamingResult))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                .andReturn();
+        String body = completedResult.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(body)
+                .contains("{\"d\":\" partial\\n\"}")
+                .contains("event:error", "\"code\":50001", "\"status\":\"FAILED\"")
+                .containsOnlyOnce("event:error")
+                .doesNotContain("event:done");
+    }
+
+    @Test
+    void chatToGenCodeIgnoresAnyUpstreamSignalAfterTheFirstTerminalEvent() {
+        IllegalStateException lateFailure = new IllegalStateException("late failure");
+        given(appService.chatToGenCode(406L, "continue", loginUser))
+                .willReturn(Flux.concat(
+                        Flux.just(
+                                new AppGenerationEvent.Content("partial"),
+                                new AppGenerationEvent.Failed(
+                                        ErrorCode.OPERATION_ERROR.getCode(),
+                                        "生成失败，请稍后重试",
+                                        "FAILED"
+                                )
+                        ),
+                        Flux.error(lateFailure)
+                ));
+        AppController targetController = AopTestUtils.getTargetObject(appController);
+        AppChatRequestDTO request = new AppChatRequestDTO();
+        request.setAppId(406L);
+        request.setMessage("continue");
+
+        List<ServerSentEvent<String>> events = targetController
+                .chatToGenCode(request, new MockHttpServletRequest())
+                .collectList()
+                .block();
+
+        assertThat(events).isNotNull();
+        assertThat(events).extracting(ServerSentEvent::event)
+                .containsExactly(null, "error");
+    }
+
+    @Test
+    void synchronousGenerationValidationFailureRemainsJson() throws Exception {
+        given(appService.chatToGenCode(405L, "continue", loginUser))
+                .willThrow(new BusinessException(
+                        ErrorCode.PARAMS_ERROR, "提示词不能为空"));
+
+        mockMvc.perform(post("/app/chat/gen/code")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"appId": 405, "message": "continue"}
+                                """)
+                        .accept(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.code").value(ErrorCode.PARAMS_ERROR.getCode()));
     }
 
     @Test
@@ -1018,6 +1108,7 @@ class AppControllerTest {
                                   "cover": "cover.png",
                                   "initPrompt": "build",
                                   "codeGenType": "html",
+                                  "generationStatus": "FAILED",
                                   "deployKey": "deploy-key",
                                   "priority": 99,
                                   "userId": 13
@@ -1036,6 +1127,7 @@ class AppControllerTest {
         assertThat(query.getCover()).isEqualTo("cover.png");
         assertThat(query.getInitPrompt()).isEqualTo("build");
         assertThat(query.getCodeGenType()).isEqualTo("html");
+        assertThat(query.getGenerationStatus()).isEqualTo("FAILED");
         assertThat(query.getDeployKey()).isEqualTo("deploy-key");
         assertThat(query.getPriority()).isEqualTo(99);
         assertThat(query.getUserId()).isEqualTo(13L);

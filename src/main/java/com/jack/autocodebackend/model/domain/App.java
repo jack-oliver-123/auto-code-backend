@@ -43,6 +43,30 @@ public class App {
     private String codeGenType;
 
     /**
+     * Lifecycle of the latest generation attempt.
+     */
+    private String generationStatus;
+
+    /**
+     * Opaque identity used to guard terminal attempt updates.
+     */
+    private String generationAttemptId;
+
+    /**
+     * Bounded application-owned failure category.
+     */
+    private String generationFailureCode;
+
+    /**
+     * Safe failure information for the owner and administrators.
+     */
+    private String generationFailureMessage;
+
+    private Date generationStartedTime;
+
+    private Date generationFinishedTime;
+
+    /**
      * 部署标识
      */
     private String deployKey;

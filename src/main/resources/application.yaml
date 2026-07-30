@@ -1,4 +1,9 @@
 spring:
+  session:
+    timeout: ${SESSION_TIMEOUT:30d}
+    data:
+      redis:
+        namespace: ${SESSION_REDIS_NAMESPACE:auto-code:session}
   profiles:
     active: local
   application:
@@ -11,10 +16,80 @@ spring:
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      username: ${REDIS_USERNAME:}
+      password: ${REDIS_PASSWORD:}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:2s}
+      timeout: ${REDIS_READ_TIMEOUT:2s}
+      ssl:
+        enabled: ${REDIS_SSL_ENABLED:false}
+
+langchain4j:
+  open-ai:
+    chat-model:
+      timeout: ${APP_GENERATION_PROVIDER_TIMEOUT:5m}
+    streaming-chat-model:
+      timeout: ${APP_GENERATION_PROVIDER_TIMEOUT:5m}
+
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: false
 app:
+  redis:
+    startup-check-enabled: ${REDIS_STARTUP_CHECK_ENABLED:true}
+  generation:
+    provider-timeout: ${APP_GENERATION_PROVIDER_TIMEOUT:5m}
+    complete-attempt-timeout: ${APP_GENERATION_COMPLETE_ATTEMPT_TIMEOUT:8m}
+    servlet-async-timeout: ${APP_GENERATION_SERVLET_ASYNC_TIMEOUT:9m}
+    heartbeat-interval: ${APP_GENERATION_HEARTBEAT_INTERVAL:15s}
+    stale-attempt-age: ${APP_GENERATION_STALE_ATTEMPT_AGE:12m}
+    reconciliation-initial-delay-ms: ${APP_GENERATION_RECONCILIATION_INITIAL_DELAY_MS:60000}
+    reconciliation-interval-ms: ${APP_GENERATION_RECONCILIATION_INTERVAL_MS:60000}
+  vue-project:
+    protocol-version: ${VUE_PROJECT_PROTOCOL_VERSION:1}
+    response-max-chars: ${VUE_PROJECT_RESPONSE_MAX_CHARS:600000}
+    model-max-files: ${VUE_PROJECT_MODEL_MAX_FILES:24}
+    scaffold-file-count: ${VUE_PROJECT_SCAFFOLD_FILE_COUNT:4}
+    combined-max-files: ${VUE_PROJECT_COMBINED_MAX_FILES:28}
+    file-max-chars: ${VUE_PROJECT_FILE_MAX_CHARS:100000}
+    source-max-chars: ${VUE_PROJECT_SOURCE_MAX_CHARS:500000}
+    source-context-max-chars: ${VUE_PROJECT_SOURCE_CONTEXT_MAX_CHARS:500000}
+    path-max-chars: ${VUE_PROJECT_PATH_MAX_CHARS:180}
+    path-max-depth: ${VUE_PROJECT_PATH_MAX_DEPTH:8}
+    dist-max-files: ${VUE_PROJECT_DIST_MAX_FILES:200}
+    dist-max-bytes: ${VUE_PROJECT_DIST_MAX_BYTES:20971520}
+    build-timeout: ${VUE_PROJECT_BUILD_TIMEOUT:120s}
+    build-acquire-timeout: ${VUE_PROJECT_BUILD_ACQUIRE_TIMEOUT:5s}
+    build-concurrency: ${VUE_PROJECT_BUILD_CONCURRENCY:2}
+    runtime-executable: ${VUE_PROJECT_RUNTIME_EXECUTABLE:docker}
+    builder-image: ${VUE_PROJECT_BUILDER_IMAGE:auto-code-vue-builder:1.0.0}
+    cpu-limit: ${VUE_PROJECT_CPU_LIMIT:1.0}
+    memory-limit: ${VUE_PROJECT_MEMORY_LIMIT:512m}
+    pids-limit: ${VUE_PROJECT_PIDS_LIMIT:128}
+    tmpfs-size: ${VUE_PROJECT_TMPFS_SIZE:64m}
+    diagnostic-max-bytes: ${VUE_PROJECT_DIAGNOSTIC_MAX_BYTES:16384}
+    readiness-required: ${VUE_PROJECT_READINESS_REQUIRED:true}
+    readiness-probe-timeout: ${VUE_PROJECT_READINESS_PROBE_TIMEOUT:2s}
+    readiness-cache-ttl: ${VUE_PROJECT_READINESS_CACHE_TTL:5s}
+    readiness-diagnostic-max-bytes: ${VUE_PROJECT_READINESS_DIAGNOSTIC_MAX_BYTES:1024}
+  chat-memory:
+    history-limit: ${CHAT_MEMORY_HISTORY_LIMIT:10}
+    message-max-chars: ${CHAT_MEMORY_MESSAGE_MAX_CHARS:6000}
+    total-max-chars: ${CHAT_MEMORY_TOTAL_MAX_CHARS:24000}
+    payload-max-bytes: ${CHAT_MEMORY_PAYLOAD_MAX_BYTES:262144}
+    snapshot-ttl: ${CHAT_MEMORY_SNAPSHOT_TTL:7d}
+    cache-maximum-size: ${CHAT_MEMORY_CACHE_MAXIMUM_SIZE:1000}
+    cache-ttl: ${CHAT_MEMORY_CACHE_TTL:10m}
+    redis-key-prefix: ${CHAT_MEMORY_REDIS_KEY_PREFIX:auto-code:chat-memory:v1:}
+    invalidation-channel: ${CHAT_MEMORY_INVALIDATION_CHANNEL:auto-code:chat-memory:invalidation:v1}
+  processing-lease:
+    duration: ${APP_PROCESSING_LEASE_DURATION:30s}
+    renewal-interval: ${APP_PROCESSING_LEASE_RENEWAL_INTERVAL:10s}
+    redis-key-prefix: ${APP_PROCESSING_LEASE_REDIS_KEY_PREFIX:auto-code:processing-lease:v1:}
   deployment:
     root-dir: ${APP_DEPLOY_ROOT_DIR:tmp/code_deploy}
     host: ${APP_DEPLOY_HOST:http://localhost:9332}
@@ -22,8 +97,10 @@ app:
       enabled: ${APP_DEPLOY_LOCAL_SERVER_ENABLED:true}
       bind-address: ${APP_DEPLOY_LOCAL_SERVER_BIND_ADDRESS:127.0.0.1}
       port: ${APP_DEPLOY_LOCAL_SERVER_PORT:9332}
+  preview:
+    host: ${APP_PREVIEW_HOST:http://localhost:9332}
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174}
 server:
   port: 9321
   servlet:
@@ -31,6 +108,10 @@ server:
     session:
       cookie:
         path: /api
+        http-only: true
+        secure: ${SESSION_COOKIE_SECURE:false}
+        same-site: ${SESSION_COOKIE_SAME_SITE:lax}
+        max-age: ${SESSION_COOKIE_MAX_AGE:30d}
 # springdoc-openapi项目配置
 springdoc:
   group-configs:

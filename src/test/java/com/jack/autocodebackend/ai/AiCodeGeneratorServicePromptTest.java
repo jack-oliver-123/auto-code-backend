@@ -33,6 +33,15 @@ class AiCodeGeneratorServicePromptTest {
                 "description"
         );
         assertPromptContract(
+                "generateVueProjectCode",
+                "prompt/codegen-vue-structured-system-prompt.md",
+                false,
+                "src/main.js",
+                "src/App.vue",
+                "src/router/index.js",
+                "createWebHashHistory()"
+        );
+        assertPromptContract(
                 "generateHtmlCodeStream",
                 "prompt/codegen-html-system-prompt.md",
                 true
@@ -42,6 +51,19 @@ class AiCodeGeneratorServicePromptTest {
                 "prompt/codegen-multi-file-system-prompt.md",
                 true
         );
+        assertPromptContract(
+                "generateVueProjectCodeStream",
+                "prompt/codegen-vue-system-prompt.md",
+                true,
+                "<<<AUTO_CODE_PROJECT_V1>>>",
+                "<<<END_AUTO_CODE_PROJECT_V1>>>",
+                "createWebHashHistory()",
+                "普通对话模式"
+        );
+
+        String vuePrompt = readClasspathResource("prompt/codegen-vue-system-prompt.md");
+        assertTrue(vuePrompt.contains("没有文件写入、读取或终端工具"));
+        assertTrue(!vuePrompt.contains("writeFile("));
     }
 
     private void assertPromptContract(

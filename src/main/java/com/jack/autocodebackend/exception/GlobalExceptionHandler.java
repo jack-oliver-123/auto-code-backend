@@ -67,6 +67,9 @@ public class GlobalExceptionHandler {
         if (code == ErrorCode.NOT_FOUND_ERROR.getCode()) {
             return HttpStatus.NOT_FOUND;
         }
+        if (code == ErrorCode.DEPENDENCY_UNAVAILABLE.getCode()) {
+            return HttpStatus.SERVICE_UNAVAILABLE;
+        }
         return HttpStatus.INTERNAL_SERVER_ERROR;
     }
 }

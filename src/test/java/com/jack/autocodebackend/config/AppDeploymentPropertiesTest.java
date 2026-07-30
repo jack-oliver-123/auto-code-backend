@@ -20,6 +20,7 @@ class AppDeploymentPropertiesTest {
                 .withPropertyValues(
                         "app.deployment.root-dir=build/deployment-test",
                         "app.deployment.host=https://static.example.com///",
+                        "app.preview.host=https://preview.example.com///",
                         "app.deployment.local-server.enabled=false",
                         "app.deployment.local-server.bind-address=0.0.0.0",
                         "app.deployment.local-server.port=9443"
@@ -37,6 +38,9 @@ class AppDeploymentPropertiesTest {
                             properties.buildDeployUrl("aB3x9Q")
                     );
 
+                    AppPreviewProperties preview = context.getBean(AppPreviewProperties.class);
+                    assertEquals("https://preview.example.com", preview.getHost());
+
                     AppDeploymentLocalServerProperties localServer = context.getBean(
                             AppDeploymentLocalServerProperties.class
                     );
@@ -50,11 +54,13 @@ class AppDeploymentPropertiesTest {
     void bindsDevelopmentDefaultsForTheIsolatedLocalServer() {
         contextRunner.run(context -> {
             AppDeploymentProperties deployment = context.getBean(AppDeploymentProperties.class);
+            AppPreviewProperties preview = context.getBean(AppPreviewProperties.class);
             AppDeploymentLocalServerProperties localServer = context.getBean(
                     AppDeploymentLocalServerProperties.class
             );
 
             assertEquals("http://localhost:9332", deployment.getHost());
+            assertEquals("http://localhost:9332", preview.getHost());
             assertEquals(true, localServer.isEnabled());
             assertEquals("127.0.0.1", localServer.getBindAddress());
             assertEquals(9332, localServer.getPort());
@@ -90,6 +96,7 @@ class AppDeploymentPropertiesTest {
                 IllegalArgumentException.class,
                 () -> new AppDeploymentProperties(deploymentRoot, "///")
         );
+        assertThrows(IllegalArgumentException.class, () -> new AppPreviewProperties("///"));
 
         AppDeploymentProperties properties = new AppDeploymentProperties(
                 deploymentRoot,

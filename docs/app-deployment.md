@@ -20,6 +20,87 @@ The backend returns URLs in the form:
 http://localhost:9332/aB3x9Q/
 ```
 
+## Vue Project Builder
+
+New applications generate a backend-owned Vue/Vite project at
+`tmp/code_output/vue_project_{appId}`. The stable tree contains the trusted
+`index.html`, `package.json`, lockfile, and Vite configuration, the complete
+model-owned `src` and optional `public` source, and the compiled `dist` tree.
+It never contains `node_modules`. Preview and deployment copy only `dist`, so
+source, package metadata, and build configuration are never exposed as static
+assets. Existing `html_{appId}` and `multi_file_{appId}` layouts are unchanged.
+
+Build and publish the tracked trusted image before enabling Vue generation:
+
+```text
+docker build --pull -t auto-code-vue-builder:1.0.0 docker/vue-builder
+```
+
+The backend host needs a compatible Docker CLI/daemon (or an equivalent
+configured OCI runtime), permission to start containers, the pinned image
+available locally, and read/write access to `tmp/code_output`. Runtime builds
+do not install packages, execute project package scripts, load generated Vite
+configuration, access the network, or receive backend environment variables.
+The container runs as UID/GID 10001 with a read-only root filesystem, dropped
+capabilities, `no-new-privileges`, and only the staging workspace plus bounded
+temporary storage mounted writable.
+
+| Property / environment variable | Default | Limit |
+| --- | --- | --- |
+| `protocol-version` / `VUE_PROJECT_PROTOCOL_VERSION` | `1` | Accepted streaming protocol |
+| `response-max-chars` / `VUE_PROJECT_RESPONSE_MAX_CHARS` | `600000` | Complete AI response |
+| `model-max-files` / `VUE_PROJECT_MODEL_MAX_FILES` | `24` | Model-owned source files |
+| `combined-max-files` / `VUE_PROJECT_COMBINED_MAX_FILES` | `28` | Source plus four scaffold files; must remain below 30 |
+| `file-max-chars` / `VUE_PROJECT_FILE_MAX_CHARS` | `100000` | One source file |
+| `source-max-chars` / `VUE_PROJECT_SOURCE_MAX_CHARS` | `500000` | Complete model-owned source |
+| `source-context-max-chars` / `VUE_PROJECT_SOURCE_CONTEXT_MAX_CHARS` | `500000` | Later-request source context including framing |
+| `path-max-chars`, `path-max-depth` / `VUE_PROJECT_PATH_MAX_CHARS`, `VUE_PROJECT_PATH_MAX_DEPTH` | `180`, `8` | Relative source paths |
+| `dist-max-files`, `dist-max-bytes` / `VUE_PROJECT_DIST_MAX_FILES`, `VUE_PROJECT_DIST_MAX_BYTES` | `200`, `20971520` | Compiled static output |
+| `build-timeout`, `build-acquire-timeout` / `VUE_PROJECT_BUILD_TIMEOUT`, `VUE_PROJECT_BUILD_ACQUIRE_TIMEOUT` | `120s`, `5s` | Build wall clock and queue wait |
+| `build-concurrency` / `VUE_PROJECT_BUILD_CONCURRENCY` | `2` | Fair global build permits per backend process |
+| `runtime-executable`, `builder-image` / `VUE_PROJECT_RUNTIME_EXECUTABLE`, `VUE_PROJECT_BUILDER_IMAGE` | `docker`, `auto-code-vue-builder:1.0.0` | Trusted runtime and image |
+| `cpu-limit`, `memory-limit`, `pids-limit`, `tmpfs-size` / corresponding `VUE_PROJECT_*` variables | `1.0`, `512m`, `128`, `64m` | Per-container resources |
+| `diagnostic-max-bytes` / `VUE_PROJECT_DIAGNOSTIC_MAX_BYTES` | `16384` | Retained sanitized process output |
+| `readiness-required` / `VUE_PROJECT_READINESS_REQUIRED` | `true` | Require the trusted Builder runtime and local image before accepting traffic |
+| `readiness-probe-timeout`, `readiness-cache-ttl` / `VUE_PROJECT_READINESS_PROBE_TIMEOUT`, `VUE_PROJECT_READINESS_CACHE_TTL` | `2s`, `5s` | Probe deadline and short result cache; maximums are `10s` and `60s` |
+| `readiness-diagnostic-max-bytes` / `VUE_PROJECT_READINESS_DIAGNOSTIC_MAX_BYTES` | `1024` | Probe output retention; maximum `4096` bytes |
+
+All limits are validated at startup. A missing runtime/image, nonzero exit,
+timeout, interruption, capacity exhaustion, invalid source, or invalid `dist`
+fails only the affected generation and preserves the previous stable project
+and preview. Logs identify the app id and failure category, but intentionally
+omit generated source, environment values, and raw builder output. Inspect the
+runtime service and local image inventory for availability failures; inspect
+configured limits for timeout, capacity, and output-validation failures.
+
+The real-image check is opt-in and never contacts an AI provider:
+
+```text
+mvn -Pvue-builder-smoke-tests verify
+```
+
+## Builder Readiness
+
+`GET /api/health/ready` requires both Redis and the Vue Builder by default. The
+Builder probe executes only a bounded local image inspection equivalent to
+`docker image inspect`: it never pulls an image, starts a container, runs a
+build, or accesses generated source. Probe output is capped and discarded from
+the HTTP response and logs. Results are cached for five seconds so orchestrator
+polling does not create one process per request.
+
+An unavailable Redis dependency returns HTTP 503 with `data: "redis"`. A missing
+runtime, unreachable daemon, missing trusted image, probe timeout, or internal
+probe failure returns HTTP 503 with `data: "vue-builder"`. No host path, runtime
+output, environment value, or container configuration is returned. After the
+runtime or image is restored, the same instance returns HTTP 200 after the
+configured cache TTL; no restart is required. `GET /api/health/live` and its
+`/api/health/check` compatibility alias remain process-only checks.
+
+A deliberately read-only instance that will never serve generation traffic can
+set `VUE_PROJECT_READINESS_REQUIRED=false`. This is an explicit capability
+opt-out; the default remains `true`. Disabling readiness does not make Vue
+generation work without the configured runtime and trusted image.
+
 ## Generated Draft Preview
 
 Generation preview and deployment are separate states. Successful generation publishes the latest complete draft to `tmp/code_output`, but it does not allocate a `deployKey`, update `deployedTime`, or replace an existing public deployment. `POST /api/app/deploy` remains the explicit publish operation.
@@ -33,7 +114,7 @@ data:{"previewUrl":"http://localhost:9332/preview/<token>/","expiresAt":17534057
 
 New frontend code should navigate an iframe or browser to `done.previewUrl` and allow redirects. This URL is a bootstrap credential, not a generated-content URL. After validating it, the isolated preview server sets an `HttpOnly`, `SameSite=Strict` cookie scoped to `/preview-content/{publicId}/`, then returns `302` or `303` to that token-free path. The browser loads `index.html` and relative assets from the immutable snapshot through the scoped cookie; generated JavaScript cannot read the cookie, and the bearer token does not remain in the content URL.
 
-For compatibility, an authenticated owner may still open the exact legacy URL `/api/static/{codeGenType}_{appId}/`, where `codeGenType` is `html` or `multi_file` and `appId` is positive. That API endpoint never serves generated bytes: it validates the owner, creates a fresh bootstrap grant, and returns `307 Temporary Redirect` to `previewUrl` with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The preview server then performs the cookie exchange described above. Malformed directory names, nested asset paths, and arbitrary `/api/static/**` requests are not static-resource mappings and remain errors.
+For compatibility, an authenticated owner may still open the exact legacy URL `/api/static/{codeGenType}_{appId}/`, where `codeGenType` is `html`, `multi_file`, or `vue_project` and `appId` is positive. That API endpoint never serves generated bytes: it validates the owner, creates a fresh bootstrap grant, and returns `307 Temporary Redirect` to `previewUrl` with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The preview server then performs the cookie exchange described above. Malformed directory names, nested asset paths, and arbitrary `/api/static/**` requests are not static-resource mappings and remain errors.
 
 Bootstrap tokens do not reveal the application id or generation type. They are issued only to the authenticated owner, expire automatically, and are invalidated after a later snapshot is successfully signed, application deletion, or backend restart. Each grant is bound to one immutable snapshot rather than the mutable `tmp/code_output/{codeGenType}_{appId}` directory. If regeneration fails, is cancelled, or cannot sign and publish its new preview snapshot, the stream emits no `done` and the previous token or preview cookie continues to show the previous snapshot. It must never begin serving partially updated or newly generated files through the old grant.
 
@@ -104,12 +185,12 @@ The current processing guard coordinates one JVM. Run a single deployment writer
 
 ## Smoke Test
 
-1. Generate an HTML App and a multi-file App to completion, then navigate to each `done.previewUrl` before deploying.
+1. Build the trusted Vue image, run the opt-in builder smoke profile, then generate an HTML App, a multi-file App, and a Vue App to completion and navigate to each `done.previewUrl` before deploying.
 2. Confirm the bootstrap response sets an `HttpOnly`, `SameSite=Strict`, path-isolated cookie and redirects to `/preview-content/{publicId}/` without the bearer token in the final URL.
 3. Confirm multi-file CSS and JavaScript load relative to the token-free content directory, the exact owner-authenticated legacy URL returns a `307` to the bootstrap URL, and the API origin never serves generated file content.
 4. Force regeneration preview signing to fail; confirm no `done` is emitted and the prior token or cookie still serves the prior immutable snapshot.
 5. Regenerate successfully; confirm prior preview access returns `404`, the new bootstrap flow serves the new snapshot, and any prior deployment still serves its old published snapshot.
-6. Deploy each App and open the returned trailing-slash deployment URL.
+6. Deploy each App and open the returned trailing-slash deployment URL; confirm the Vue target contains compiled `dist` assets only and hash navigation works below the deploy key.
 7. Confirm unsupported methods and directory-listing attempts are rejected and the CSP does not contain `allow-same-origin` or `allow-forms`.
 8. Restart the backend; confirm old bootstrap and content access return `404`, then request `POST /api/app/preview` as the owner and open the replacement bootstrap URL.
 9. Disable the local listener; confirm generation fails before any AI provider call unless a token-aware preview provider is configured.

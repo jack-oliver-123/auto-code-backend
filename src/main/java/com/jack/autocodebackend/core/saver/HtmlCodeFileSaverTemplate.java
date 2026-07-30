@@ -6,11 +6,18 @@ import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.core.validator.HtmlDocumentValidator;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
+import org.springframework.stereotype.Component;
 
 /**
  * HTML 单文件保存器。
  */
+@Component
 public final class HtmlCodeFileSaverTemplate extends CodeFileSaverTemplate<HtmlCodeResult> {
+
+    @Override
+    public Class<HtmlCodeResult> resultType() {
+        return HtmlCodeResult.class;
+    }
 
     @Override
     protected CodeGenTypeEnum getCodeType() {

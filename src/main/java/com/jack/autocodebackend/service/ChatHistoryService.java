@@ -10,6 +10,8 @@ import com.jack.autocodebackend.model.enums.ChatHistoryMessageTypeEnum;
 import com.jack.autocodebackend.model.vo.ChatHistoryCursorPageVO;
 import com.jack.autocodebackend.model.vo.ChatHistoryVO;
 
+import java.util.List;
+
 /**
  * 对话历史服务。
  */
@@ -34,6 +36,8 @@ public interface ChatHistoryService extends IService<ChatHistory> {
     Page<ChatHistoryVO> listAllHistoryByAdmin(ChatHistoryAdminQueryDTO queryDTO);
 
     void deleteByAppId(Long appId);
+
+    List<ChatHistory> listLatestForMemory(Long appId, Long beforeId, int limit);
 
     ChatHistoryVO getChatHistoryVO(ChatHistory chatHistory);
 

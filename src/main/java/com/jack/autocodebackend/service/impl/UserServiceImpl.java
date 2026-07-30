@@ -12,6 +12,7 @@ import com.jack.autocodebackend.mapper.UserMapper;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
 import com.jack.autocodebackend.model.enums.UserRoleEnum;
+import com.jack.autocodebackend.model.session.AuthenticatedSession;
 import com.jack.autocodebackend.model.vo.UserAddResultVO;
 import com.jack.autocodebackend.model.vo.UserLoginVO;
 import com.jack.autocodebackend.model.vo.UserPasswordResetResultVO;
@@ -25,6 +26,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.crypto.password.Pbkdf2PasswordEncoder;
+import org.springframework.data.redis.serializer.SerializationException;
+import org.springframework.session.SessionRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.util.DigestUtils;
 
@@ -33,7 +36,6 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -83,6 +85,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
 
     private final SecureRandom secureRandom = new SecureRandom();
 
+    private final SessionRepository<?> sessionRepository;
+
+    public UserServiceImpl(SessionRepository<?> sessionRepository) {
+        this.sessionRepository = sessionRepository;
+    }
+
     @Override
     public long userRegister(String userAccount, String userPassword, String checkPassword) {
         validateUserAccount(userAccount);
@@ -127,23 +135,54 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         if (request == null) {
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
-        HttpSession session = request.getSession(false);
+        HttpSession session;
+        Object loginState;
+        try {
+            session = request.getSession(false);
+            loginState = session == null
+                    ? null
+                    : session.getAttribute(USER_LOGIN_STATE);
+        } catch (SerializationException malformedSession) {
+            deleteMalformedSession(request, malformedSession);
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
         if (session == null) {
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
-        Object userObj = session.getAttribute(USER_LOGIN_STATE);
-        if (!(userObj instanceof User sessionUser) || sessionUser.getId() == null) {
+        if (!(loginState instanceof AuthenticatedSession authenticatedSession)) {
+            log.debug("Rejected authenticated session with an unsupported login-state format");
             session.invalidate();
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
 
-        User currentUser = this.getById(sessionUser.getId());
-        if (currentUser == null
-                || !Objects.equals(sessionUser.getUserPassword(), currentUser.getUserPassword())) {
+        User currentUser = this.getById(authenticatedSession.userId());
+        if (currentUser == null) {
+            log.debug("Rejected authenticated session because the account is unavailable");
+            session.invalidate();
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        if (!authenticatedSession.matchesCredential(currentUser.getUserPassword())) {
+            log.debug("Rejected authenticated session after credential version changed");
             session.invalidate();
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
         return currentUser;
+    }
+
+    private void deleteMalformedSession(
+            HttpServletRequest request,
+            SerializationException malformedSession
+    ) {
+        String sessionId = request.getRequestedSessionId();
+        if (sessionId != null && !sessionId.isBlank()) {
+            try {
+                sessionRepository.deleteById(sessionId);
+            } catch (RuntimeException deletionFailure) {
+                malformedSession.addSuppressed(deletionFailure);
+                log.warn("Failed to delete malformed distributed session");
+            }
+        }
+        log.debug("Rejected authenticated session with malformed serialized state");
     }
 
     @Override
@@ -283,7 +322,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
         request.changeSessionId();
-        session.setAttribute(USER_LOGIN_STATE, loginUser);
+        session.setAttribute(USER_LOGIN_STATE, authenticatedSession(loginUser));
         return true;
     }
 
@@ -379,7 +418,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>
         } else {
             request.changeSessionId();
         }
-        session.setAttribute(USER_LOGIN_STATE, user);
+        session.setAttribute(USER_LOGIN_STATE, authenticatedSession(user));
+    }
+
+    private AuthenticatedSession authenticatedSession(User user) {
+        return AuthenticatedSession.fromCredential(user.getId(), user.getUserPassword());
     }
 
     private void validateUserAccount(String userAccount) {

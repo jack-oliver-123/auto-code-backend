@@ -3,6 +3,7 @@ package com.jack.autocodebackend.core.deploy;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.config.AppDeploymentLocalServerProperties;
 import com.jack.autocodebackend.config.AppDeploymentProperties;
+import com.jack.autocodebackend.config.AppPreviewProperties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,12 +28,15 @@ import java.time.ZoneOffset;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class AppDeploymentLocalServerTest {
@@ -288,6 +292,25 @@ class AppDeploymentLocalServerTest {
     }
 
     @Test
+    void buildsPreviewGrantUrlFromTheIndependentPreviewHost() throws Exception {
+        createPreviewFixture(CodeGenTypeEnum.HTML, PREVIEW_APP_ID);
+        localServer = newLocalServer(
+                "http://127.0.0.1:0",
+                "http://localhost:0",
+                new AppDeploymentLocalServerProperties(true, "127.0.0.1", 0)
+        );
+        localServer.start();
+
+        URI previewUri = URI.create(localServer.issuePreview(
+                PREVIEW_APP_ID,
+                CodeGenTypeEnum.HTML
+        ).url());
+
+        assertEquals("localhost", previewUri.getHost());
+        assertEquals(localServer.getAddress().getPort(), previewUri.getPort());
+    }
+
+    @Test
     void failedRefreshKeepsV1SnapshotAndSuccessfulRefreshRotatesToV2() throws Exception {
         Path source = createPreviewFixture(CodeGenTypeEnum.MULTI_FILE, PREVIEW_APP_ID);
         startServer();
@@ -347,6 +370,141 @@ class AppDeploymentLocalServerTest {
                 secondSession.cookiePair()
         ).body(), StandardCharsets.UTF_8);
         assertBundledPreview(secondBundledIndex, indexV2);
+    }
+
+    @Test
+    void preparedPreviewRollbackRestoresPreviousGrantAndSnapshot() throws Exception {
+        Path source = createPreviewFixture(CodeGenTypeEnum.HTML, PREVIEW_APP_ID);
+        startServer();
+        AppDeploymentLocalServer.PreviewAccess first = localServer.issuePreview(
+                PREVIEW_APP_ID, CodeGenTypeEnum.HTML);
+        PreviewSession firstSession = bootstrap(first);
+        Path firstSnapshot = previewSnapshotRoot.resolve(firstSession.publicId());
+        Files.writeString(source.resolve("index.html"), "<h1>candidate</h1>");
+
+        AppDeploymentLocalServer.PreviewPublication candidate =
+                localServer.preparePreview(PREVIEW_APP_ID, CodeGenTypeEnum.HTML);
+        PreviewSession candidateSession = bootstrap(candidate.access());
+        Path candidateSnapshot = previewSnapshotRoot.resolve(candidateSession.publicId());
+        assertEquals(404, requestWithCookie(
+                "GET", firstSession.contentRoot(), firstSession.cookiePair()).statusCode());
+        assertTrue(Files.isDirectory(firstSnapshot));
+        assertTrue(Files.isDirectory(candidateSnapshot));
+
+        candidate.rollback();
+        candidate.close();
+
+        assertEquals(200, requestWithCookie(
+                "GET", firstSession.contentRoot(), firstSession.cookiePair()).statusCode());
+        assertEquals(404, requestWithCookie(
+                "GET", candidateSession.contentRoot(), candidateSession.cookiePair()).statusCode());
+        assertTrue(Files.isDirectory(firstSnapshot));
+        assertFalse(Files.exists(candidateSnapshot));
+    }
+
+    @Test
+    void committedPreviewRemainsUsableWhenOldSnapshotCleanupFails() throws Exception {
+        Path source = createPreviewFixture(CodeGenTypeEnum.HTML, PREVIEW_APP_ID);
+        NioFileTreeOperations operations = spy(new NioFileTreeOperations());
+        localServer = new AppDeploymentLocalServer(
+                new AppDeploymentProperties(deploymentRoot, "http://127.0.0.1:0"),
+                new AppPreviewProperties("http://127.0.0.1:0"),
+                new AppDeploymentLocalServerProperties(true, "127.0.0.1", 0),
+                previewOutputRoot,
+                previewSnapshotRoot,
+                clock,
+                new SecureRandom(),
+                operations
+        );
+        localServer.start();
+        serverOrigin = URI.create("http://127.0.0.1:" + localServer.getAddress().getPort());
+        AppDeploymentLocalServer.PreviewAccess previous = localServer.issuePreview(
+                PREVIEW_APP_ID, CodeGenTypeEnum.HTML);
+        Path previousSnapshot;
+        try (var snapshots = Files.list(previewSnapshotRoot)) {
+            previousSnapshot = snapshots.findFirst().orElseThrow();
+        }
+        Files.writeString(source.resolve("index.html"), "<h1>candidate</h1>");
+        AppDeploymentLocalServer.PreviewPublication candidate =
+                localServer.preparePreview(PREVIEW_APP_ID, CodeGenTypeEnum.HTML);
+        doThrow(new IOException("old snapshot cleanup failed"))
+                .when(operations).deleteTree(previousSnapshot);
+
+        assertDoesNotThrow(candidate::commit);
+        assertDoesNotThrow(candidate::close);
+
+        assertTrue(Files.isDirectory(previousSnapshot));
+        assertEquals(2, countPreviewRootEntries());
+        assertEquals(404, request(
+                "GET", URI.create(previous.url()).getRawPath()).statusCode());
+        assertEquals(302, request(
+                "GET", URI.create(candidate.access().url()).getRawPath()).statusCode());
+    }
+
+    @Test
+    void vuePreviewCopiesOnlyDistAndServesRelativeAssetsWithMimeTypes() throws Exception {
+        long longAppId = Long.MAX_VALUE;
+        Path project = createPreviewFixture(CodeGenTypeEnum.VUE_PROJECT, longAppId);
+        Files.createDirectories(project.resolve("src"));
+        Files.writeString(project.resolve("src/App.vue"), "private-source");
+        Files.writeString(project.resolve("package.json"), "private-scaffold");
+        Path dist = project.resolve("dist");
+        String vueIndex = "<!doctype html><div id=\"app\"></div>"
+                + "<link rel=\"stylesheet\" href=\"./assets/app.css\">"
+                + "<script type=\"module\" src=\"./assets/app.js\"></script>";
+        Files.writeString(dist.resolve("index.html"), vueIndex);
+        Files.createDirectories(dist.resolve("assets"));
+        Files.writeString(dist.resolve("assets/app.js"), "console.log('vue')");
+        Files.writeString(dist.resolve("assets/app.css"), "body{color:#123}");
+        startServer();
+
+        PreviewSession session = bootstrap(localServer.issuePreview(
+                longAppId, CodeGenTypeEnum.VUE_PROJECT));
+
+        HttpResponse<byte[]> index = requestWithCookie(
+                "GET", session.contentRoot(), session.cookiePair());
+        assertEquals(200, index.statusCode());
+        assertEquals(vueIndex, new String(index.body(), StandardCharsets.UTF_8));
+        assertTrue(new String(index.body(), StandardCharsets.UTF_8).contains("./assets/app.js"));
+        HttpResponse<byte[]> javascript = requestWithCookie(
+                "GET", session.contentRoot() + "assets/app.js", session.cookiePair());
+        assertEquals(200, javascript.statusCode());
+        assertEquals("text/javascript; charset=UTF-8",
+                javascript.headers().firstValue("Content-Type").orElseThrow());
+        HttpResponse<byte[]> css = requestWithCookie(
+                "GET", session.contentRoot() + "assets/app.css", session.cookiePair());
+        assertEquals("text/css; charset=UTF-8",
+                css.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals(404, requestWithCookie(
+                "GET", session.contentRoot() + "src/App.vue", session.cookiePair()).statusCode());
+        assertEquals(404, requestWithCookie(
+                "GET", session.contentRoot() + "package.json", session.cookiePair()).statusCode());
+        assertPreviewSecurityHeaders(index);
+    }
+
+    @Test
+    void vuePreviewRejectsMissingOrInvalidDistWithoutReplacingOldGrant() throws Exception {
+        Path html = createPreviewFixture(CodeGenTypeEnum.HTML, PREVIEW_APP_ID);
+        startServer();
+        PreviewSession oldSession = bootstrap(localServer.issuePreview(
+                PREVIEW_APP_ID, CodeGenTypeEnum.HTML));
+        new NioFileTreeOperations().deleteTree(html);
+        Path vueProject = Files.createDirectories(
+                previewOutputRoot.resolve("vue_project_" + PREVIEW_APP_ID));
+        Files.createDirectories(vueProject.resolve("dist/assets"));
+        Files.writeString(vueProject.resolve("dist/assets/app.js"), "missing index");
+
+        assertThrows(IllegalStateException.class, () -> localServer.issuePreview(
+                PREVIEW_APP_ID, CodeGenTypeEnum.VUE_PROJECT));
+        assertEquals(200, requestWithCookie(
+                "GET", oldSession.contentRoot(), oldSession.cookiePair()).statusCode());
+
+        Files.writeString(vueProject.resolve("dist/index.html"), "<main/>");
+        Files.writeString(vueProject.resolve("dist/.env"), "secret");
+        assertThrows(IllegalStateException.class, () -> localServer.issuePreview(
+                PREVIEW_APP_ID, CodeGenTypeEnum.VUE_PROJECT));
+        assertEquals(200, requestWithCookie(
+                "GET", oldSession.contentRoot(), oldSession.cookiePair()).statusCode());
     }
 
     @Test
@@ -566,6 +724,7 @@ class AppDeploymentLocalServerTest {
                         deploymentRoot,
                         "http://127.0.0.1:" + occupiedPort
                 ),
+                new AppPreviewProperties("http://127.0.0.1:" + occupiedPort),
                 new AppDeploymentLocalServerProperties(
                         true,
                         "127.0.0.1",
@@ -583,6 +742,7 @@ class AppDeploymentLocalServerTest {
 
         AppDeploymentLocalServer disabledServer = new AppDeploymentLocalServer(
                 new AppDeploymentProperties(deploymentRoot, "https://sites.example.com"),
+                new AppPreviewProperties("https://preview.example.com"),
                 new AppDeploymentLocalServerProperties(false, "127.0.0.1", 9332),
                 previewOutputRoot,
                 previewSnapshotRoot,
@@ -644,10 +804,13 @@ class AppDeploymentLocalServerTest {
         Path previewDirectory = Files.createDirectories(
                 previewOutputRoot.resolve(type.getValue() + "_" + appId)
         );
-        Files.writeString(previewDirectory.resolve("index.html"), INDEX, StandardCharsets.UTF_8);
+        Path staticRoot = type == CodeGenTypeEnum.VUE_PROJECT
+                ? Files.createDirectories(previewDirectory.resolve("dist"))
+                : previewDirectory;
+        Files.writeString(staticRoot.resolve("index.html"), INDEX, StandardCharsets.UTF_8);
         if (type == CodeGenTypeEnum.MULTI_FILE) {
-            Files.writeString(previewDirectory.resolve("style.css"), STYLE, StandardCharsets.UTF_8);
-            Files.writeString(previewDirectory.resolve("script.js"), SCRIPT, StandardCharsets.UTF_8);
+            Files.writeString(staticRoot.resolve("style.css"), STYLE, StandardCharsets.UTF_8);
+            Files.writeString(staticRoot.resolve("script.js"), SCRIPT, StandardCharsets.UTF_8);
         }
         return previewDirectory;
     }
@@ -705,8 +868,17 @@ class AppDeploymentLocalServerTest {
             String publicHost,
             AppDeploymentLocalServerProperties localServerProperties
     ) {
+        return newLocalServer(publicHost, publicHost, localServerProperties);
+    }
+
+    private AppDeploymentLocalServer newLocalServer(
+            String deploymentHost,
+            String previewHost,
+            AppDeploymentLocalServerProperties localServerProperties
+    ) {
         return new AppDeploymentLocalServer(
-                new AppDeploymentProperties(deploymentRoot, publicHost),
+                new AppDeploymentProperties(deploymentRoot, deploymentHost),
+                new AppPreviewProperties(previewHost),
                 localServerProperties,
                 previewOutputRoot,
                 previewSnapshotRoot,
@@ -742,9 +914,12 @@ class AppDeploymentLocalServerTest {
         String contentSecurityPolicy = response.headers()
                 .firstValue("Content-Security-Policy")
                 .orElseThrow();
-        assertEquals("sandbox allow-scripts", contentSecurityPolicy);
-        assertFalse(contentSecurityPolicy.contains("allow-same-origin"));
-        assertFalse(contentSecurityPolicy.contains("allow-forms"));
+        assertEquals(
+                "sandbox allow-scripts allow-forms allow-same-origin",
+                contentSecurityPolicy
+        );
+        assertTrue(contentSecurityPolicy.contains("allow-same-origin"));
+        assertTrue(contentSecurityPolicy.contains("allow-forms"));
         assertFalse(contentSecurityPolicy.contains("allow-top-navigation"));
         assertEquals(
                 "camera=(), microphone=(), geolocation=()",
@@ -761,7 +936,9 @@ class AppDeploymentLocalServerTest {
         String contentSecurityPolicy = response.headers()
                 .firstValue("Content-Security-Policy")
                 .orElseThrow();
-        assertTrue(contentSecurityPolicy.startsWith("sandbox allow-scripts"));
+        assertTrue(contentSecurityPolicy.startsWith(
+                "sandbox allow-scripts allow-forms allow-same-origin"
+        ));
         assertTrue(contentSecurityPolicy.contains("connect-src 'none'"));
         assertTrue(contentSecurityPolicy.contains("img-src 'self' data: blob:"));
         assertTrue(contentSecurityPolicy.contains("style-src 'self' 'unsafe-inline' data:"));
@@ -772,8 +949,8 @@ class AppDeploymentLocalServerTest {
         assertTrue(contentSecurityPolicy.contains("base-uri 'none'"));
         assertTrue(contentSecurityPolicy.contains("object-src 'none'"));
         assertTrue(contentSecurityPolicy.contains("frame-src 'none'"));
-        assertFalse(contentSecurityPolicy.contains("allow-same-origin"));
-        assertFalse(contentSecurityPolicy.contains("allow-forms"));
+        assertTrue(contentSecurityPolicy.contains("allow-same-origin"));
+        assertTrue(contentSecurityPolicy.contains("allow-forms"));
         assertFalse(contentSecurityPolicy.contains("allow-top-navigation"));
         assertTrue(response.headers().firstValue("Access-Control-Allow-Origin").isEmpty());
         assertTrue(response.headers().firstValue("Access-Control-Allow-Credentials").isEmpty());

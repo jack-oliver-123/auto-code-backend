@@ -3,7 +3,11 @@ package com.jack.autocodebackend.core.deploy;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.config.AppDeploymentLocalServerProperties;
 import com.jack.autocodebackend.config.AppDeploymentProperties;
+import com.jack.autocodebackend.config.AppPreviewProperties;
+import com.jack.autocodebackend.config.AppVueProjectProperties;
 import com.jack.autocodebackend.constant.AppConstant;
+import com.jack.autocodebackend.core.deploy.GeneratedArtifactLayoutResolver.GeneratedArtifactLayout;
+import com.jack.autocodebackend.core.vue.VueDistValidator;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -76,9 +80,11 @@ public final class AppDeploymentLocalServer implements DisposableBean {
 
     private static final Duration PREVIEW_TTL = Duration.ofMinutes(15);
 
-    private static final String DEPLOYMENT_CONTENT_SECURITY_POLICY = "sandbox allow-scripts";
+    private static final String DEPLOYMENT_CONTENT_SECURITY_POLICY =
+            "sandbox allow-scripts allow-forms allow-same-origin";
 
-    private static final String PREVIEW_CONTENT_SECURITY_POLICY = "sandbox allow-scripts; "
+    private static final String PREVIEW_CONTENT_SECURITY_POLICY =
+            "sandbox allow-scripts allow-forms allow-same-origin; "
             + "default-src 'none'; connect-src 'none'; "
             + "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' data:; "
             + "script-src 'self' 'unsafe-inline' blob:; font-src 'self' data:; "
@@ -98,6 +104,8 @@ public final class AppDeploymentLocalServer implements DisposableBean {
 
     private final AppDeploymentProperties deploymentProperties;
 
+    private final AppPreviewProperties previewProperties;
+
     private final AppDeploymentLocalServerProperties localServerProperties;
 
     private final Path generatedOutputRoot;
@@ -107,6 +115,8 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     private final NioFileTreeOperations fileOperations;
 
     private final DirectoryPublisher snapshotPublisher;
+
+    private final VueDistValidator vueDistValidator;
 
     private final Clock clock;
 
@@ -128,24 +138,42 @@ public final class AppDeploymentLocalServer implements DisposableBean {
 
     private boolean previewSnapshotRootOwned;
 
-    @Autowired
     public AppDeploymentLocalServer(
             AppDeploymentProperties deploymentProperties,
+            AppPreviewProperties previewProperties,
             AppDeploymentLocalServerProperties localServerProperties
     ) {
         this(
                 deploymentProperties,
+                previewProperties,
+                localServerProperties,
+                new VueDistValidator(AppVueProjectProperties.defaults())
+        );
+    }
+
+    @Autowired
+    public AppDeploymentLocalServer(
+            AppDeploymentProperties deploymentProperties,
+            AppPreviewProperties previewProperties,
+            AppDeploymentLocalServerProperties localServerProperties,
+            VueDistValidator vueDistValidator
+    ) {
+        this(
+                deploymentProperties,
+                previewProperties,
                 localServerProperties,
                 Path.of(AppConstant.CODE_OUTPUT_ROOT_DIR),
                 Path.of(AppConstant.CODE_OUTPUT_ROOT_DIR).resolveSibling("code_preview"),
                 Clock.systemUTC(),
                 new SecureRandom(),
-                new NioFileTreeOperations()
+                new NioFileTreeOperations(),
+                vueDistValidator
         );
     }
 
     AppDeploymentLocalServer(
             AppDeploymentProperties deploymentProperties,
+            AppPreviewProperties previewProperties,
             AppDeploymentLocalServerProperties localServerProperties,
             Path generatedOutputRoot,
             Path previewSnapshotRoot,
@@ -153,7 +181,32 @@ public final class AppDeploymentLocalServer implements DisposableBean {
             SecureRandom secureRandom,
             NioFileTreeOperations fileOperations
     ) {
+        this(
+                deploymentProperties,
+                previewProperties,
+                localServerProperties,
+                generatedOutputRoot,
+                previewSnapshotRoot,
+                clock,
+                secureRandom,
+                fileOperations,
+                new VueDistValidator(AppVueProjectProperties.defaults())
+        );
+    }
+
+    AppDeploymentLocalServer(
+            AppDeploymentProperties deploymentProperties,
+            AppPreviewProperties previewProperties,
+            AppDeploymentLocalServerProperties localServerProperties,
+            Path generatedOutputRoot,
+            Path previewSnapshotRoot,
+            Clock clock,
+            SecureRandom secureRandom,
+            NioFileTreeOperations fileOperations,
+            VueDistValidator vueDistValidator
+    ) {
         this.deploymentProperties = Objects.requireNonNull(deploymentProperties);
+        this.previewProperties = Objects.requireNonNull(previewProperties);
         this.localServerProperties = Objects.requireNonNull(localServerProperties);
         this.generatedOutputRoot = Objects.requireNonNull(generatedOutputRoot)
                 .toAbsolutePath()
@@ -165,6 +218,7 @@ public final class AppDeploymentLocalServer implements DisposableBean {
         this.secureRandom = Objects.requireNonNull(secureRandom);
         this.fileOperations = Objects.requireNonNull(fileOperations);
         this.snapshotPublisher = new DirectoryPublisher(fileOperations);
+        this.vueDistValidator = Objects.requireNonNull(vueDistValidator);
         requirePairwiseNonOverlappingRoots(
                 deploymentProperties.getRootDir(),
                 this.generatedOutputRoot,
@@ -185,7 +239,16 @@ public final class AppDeploymentLocalServer implements DisposableBean {
                 return;
             }
             InetAddress bindAddress = resolveBindAddress();
-            validatePublicHostMatchesListener(bindAddress);
+            validatePublicHostMatchesListener(
+                    deploymentProperties.getHost(),
+                    "deployment",
+                    bindAddress
+            );
+            validatePublicHostMatchesListener(
+                    previewProperties.getHost(),
+                    "preview",
+                    bindAddress
+            );
 
             HttpServer newServer = null;
             ExecutorService newExecutor = null;
@@ -240,6 +303,14 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     }
 
     public PreviewAccess issuePreview(long appId, CodeGenTypeEnum type) {
+        try (PreviewPublication publication = preparePreview(appId, type)) {
+            PreviewAccess access = publication.access();
+            publication.commit();
+            return access;
+        }
+    }
+
+    public PreviewPublication preparePreview(long appId, CodeGenTypeEnum type) {
         if (appId <= 0) {
             throw new IllegalArgumentException("appId must be positive");
         }
@@ -253,7 +324,7 @@ public final class AppDeploymentLocalServer implements DisposableBean {
             Path snapshot = publishPreviewSnapshot(source, type, identity.publicId());
 
             Instant expiresAt = clock.instant().plus(PREVIEW_TTL);
-            PreviewGrant previousGrant;
+            PreviewInstallation installation;
             try {
                 synchronized (previewAccessMonitor) {
                     PreviewGrant newGrant = new PreviewGrant(
@@ -263,20 +334,17 @@ public final class AppDeploymentLocalServer implements DisposableBean {
                             snapshot,
                             expiresAt
                     );
-                    previousGrant = installPreviewGrant(identity.tokenDigest(), newGrant);
+                    installation = installPreviewGrant(identity.tokenDigest(), newGrant);
                 }
             } catch (RuntimeException mapFailure) {
                 deletePreviewSnapshot(snapshot);
                 throw mapFailure;
             }
 
-            if (previousGrant != null) {
-                deletePreviewSnapshot(previousGrant.snapshotDirectory());
-            }
-            return new PreviewAccess(
-                    buildPreviewUrl(identity.token(), server.getAddress().getPort()),
-                    expiresAt
+            PreviewAccess access = new PreviewAccess(
+                    buildPreviewUrl(identity.token(), server.getAddress().getPort()), expiresAt
             );
+            return new PreviewPublication(this, access, installation);
         }
     }
 
@@ -330,12 +398,16 @@ public final class AppDeploymentLocalServer implements DisposableBean {
         }
     }
 
-    private void validatePublicHostMatchesListener(InetAddress bindAddress) {
+    private void validatePublicHostMatchesListener(
+            String configuredHost,
+            String hostType,
+            InetAddress bindAddress
+    ) {
         URI publicHost;
         try {
-            publicHost = URI.create(deploymentProperties.getHost());
+            publicHost = URI.create(configuredHost);
         } catch (IllegalArgumentException exception) {
-            throw new IllegalStateException("deployment host must be a valid HTTP origin", exception);
+            throw new IllegalStateException(hostType + " host must be a valid HTTP origin", exception);
         }
 
         String path = publicHost.getRawPath();
@@ -347,14 +419,14 @@ public final class AppDeploymentLocalServer implements DisposableBean {
                 || publicHost.getRawQuery() != null
                 || publicHost.getRawFragment() != null) {
             throw new IllegalStateException(
-                    "deployment host must be an HTTP origin while the local server is enabled"
+                    hostType + " host must be an HTTP origin while the local server is enabled"
             );
         }
 
         int publicPort = publicHost.getPort() == -1 ? 80 : publicHost.getPort();
         if (publicPort != localServerProperties.getPort()) {
             throw new IllegalStateException(
-                    "deployment host port must match the deployment local server port"
+                    hostType + " host port must match the deployment local server port"
             );
         }
 
@@ -362,12 +434,12 @@ public final class AppDeploymentLocalServer implements DisposableBean {
         try {
             publicAddresses = InetAddress.getAllByName(publicHost.getHost());
         } catch (UnknownHostException exception) {
-            throw new IllegalStateException("deployment host cannot be resolved", exception);
+            throw new IllegalStateException(hostType + " host cannot be resolved", exception);
         }
         if (!bindAddress.isAnyLocalAddress()
                 && List.of(publicAddresses).stream().noneMatch(bindAddress::equals)) {
             throw new IllegalStateException(
-                    "deployment host must resolve to the deployment local server bind address"
+                    hostType + " host must resolve to the deployment local server bind address"
             );
         }
     }
@@ -609,18 +681,31 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     }
 
     private Path requireCompletePreviewSource(long appId, CodeGenTypeEnum type) {
-        Path source;
+        GeneratedArtifactLayout layout;
         try {
-            source = generatedOutputRoot.resolve(buildPreviewDirectoryName(appId, type)).normalize();
+            layout = GeneratedArtifactLayoutResolver.resolve(generatedOutputRoot, type, appId);
         } catch (InvalidPathException exception) {
             throw new IllegalStateException("generated preview source path is invalid", exception);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException("generated preview layout is invalid", exception);
         }
+        Path projectRoot = layout.projectRoot();
+        Path source = layout.staticRoot();
         if (!isSafeDirectory(generatedOutputRoot, generatedOutputRoot)
+                || !projectRoot.startsWith(generatedOutputRoot)
+                || !isSafeDirectory(generatedOutputRoot, projectRoot)
                 || !source.startsWith(generatedOutputRoot)
                 || !isSafeDirectory(generatedOutputRoot, source)) {
             throw new IllegalStateException("generated preview source is not a safe directory");
         }
 
+        if (type == CodeGenTypeEnum.VUE_PROJECT) {
+            try {
+                vueDistValidator.validateProjectDist(projectRoot);
+            } catch (IOException exception) {
+                throw new IllegalStateException("generated Vue preview output is invalid", exception);
+            }
+        }
         validatePreviewTree(source);
         validateRequiredPreviewFiles(source, type);
         return source;
@@ -719,10 +804,7 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     }
 
     private static List<String> requiredPreviewFiles(CodeGenTypeEnum type) {
-        return switch (type) {
-            case HTML -> List.of("index.html");
-            case MULTI_FILE -> List.of("index.html", "style.css", "script.js");
-        };
+        return type.getRequiredStaticFiles();
     }
 
     private static String buildPreviewDirectoryName(long appId, CodeGenTypeEnum type) {
@@ -771,7 +853,10 @@ public final class AppDeploymentLocalServer implements DisposableBean {
         return removePreviewGrant(tokenDigest);
     }
 
-    private PreviewGrant installPreviewGrant(String tokenDigest, PreviewGrant newGrant) {
+    private PreviewInstallation installPreviewGrant(
+            String tokenDigest,
+            PreviewGrant newGrant
+    ) {
         String previousDigest = previewDigestByAppId.get(newGrant.appId());
         PreviewGrant previousGrant = previousDigest == null
                 ? null
@@ -795,7 +880,38 @@ public final class AppDeploymentLocalServer implements DisposableBean {
                 previewDigestByPublicId.remove(previousGrant.publicId(), previousDigest);
             }
         }
-        return previousGrant;
+        return new PreviewInstallation(
+                tokenDigest,
+                newGrant,
+                previousDigest,
+                previousGrant
+        );
+    }
+
+    private void commitPreview(PreviewInstallation installation) {
+        PreviewGrant previousGrant = installation.previousGrant();
+        if (previousGrant != null) {
+            deletePreviewSnapshot(previousGrant.snapshotDirectory());
+        }
+    }
+
+    private void rollbackPreview(PreviewInstallation installation) {
+        synchronized (previewAccessMonitor) {
+            String currentDigest = previewDigestByAppId.get(installation.newGrant().appId());
+            if (!installation.newDigest().equals(currentDigest)) {
+                throw new IllegalStateException("preview publication is no longer current");
+            }
+            removePreviewGrant(installation.newDigest());
+            if (installation.previousGrant() != null) {
+                previewGrantsByDigest.put(
+                        installation.previousDigest(), installation.previousGrant());
+                previewDigestByAppId.put(
+                        installation.previousGrant().appId(), installation.previousDigest());
+                previewDigestByPublicId.put(
+                        installation.previousGrant().publicId(), installation.previousDigest());
+            }
+        }
+        deletePreviewSnapshot(installation.newGrant().snapshotDirectory());
     }
 
     private PreviewGrant removePreviewGrant(String tokenDigest) {
@@ -957,7 +1073,7 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     }
 
     private String buildPreviewUrl(String token, int listenerPort) {
-        URI configuredHost = URI.create(deploymentProperties.getHost());
+        URI configuredHost = URI.create(previewProperties.getHost());
         try {
             return new URI(
                     configuredHost.getScheme(),
@@ -1109,12 +1225,67 @@ public final class AppDeploymentLocalServer implements DisposableBean {
         }
     }
 
+    public static final class PreviewPublication implements AutoCloseable {
+
+        private final AppDeploymentLocalServer server;
+        private final PreviewAccess access;
+        private final PreviewInstallation installation;
+        private boolean resolved;
+
+        private PreviewPublication(
+                AppDeploymentLocalServer server,
+                PreviewAccess access,
+                PreviewInstallation installation
+        ) {
+            this.server = server;
+            this.access = access;
+            this.installation = installation;
+        }
+
+        public PreviewAccess access() {
+            return access;
+        }
+
+        public synchronized void commit() {
+            requireActive();
+            server.commitPreview(installation);
+            resolved = true;
+        }
+
+        public synchronized void rollback() {
+            requireActive();
+            server.rollbackPreview(installation);
+            resolved = true;
+        }
+
+        @Override
+        public synchronized void close() {
+            if (!resolved) {
+                rollback();
+            }
+        }
+
+        private void requireActive() {
+            if (resolved) {
+                throw new IllegalStateException("preview publication is already resolved");
+            }
+        }
+    }
+
     private record PreviewGrant(
             long appId,
             CodeGenTypeEnum type,
             String publicId,
             Path snapshotDirectory,
             Instant expiresAt
+    ) {
+    }
+
+    private record PreviewInstallation(
+            String newDigest,
+            PreviewGrant newGrant,
+            String previousDigest,
+            PreviewGrant previousGrant
     ) {
     }
 

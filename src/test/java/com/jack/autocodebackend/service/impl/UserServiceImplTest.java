@@ -6,6 +6,7 @@ import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.mapper.UserMapper;
 import com.jack.autocodebackend.model.domain.User;
 import com.jack.autocodebackend.model.dto.UserQueryDTO;
+import com.jack.autocodebackend.model.session.AuthenticatedSession;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.data.redis.serializer.SerializationException;
+import org.springframework.session.SessionRepository;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -32,11 +35,13 @@ class UserServiceImplTest {
 
     private final HttpSession session = mock(HttpSession.class);
 
+    private final SessionRepository<?> sessionRepository = mock(SessionRepository.class);
+
     private UserServiceImpl userService;
 
     @BeforeEach
     void setUp() {
-        userService = new UserServiceImpl();
+        userService = new UserServiceImpl(sessionRepository);
         ReflectionTestUtils.setField(userService, "baseMapper", userMapper);
         given(request.getSession()).willReturn(session);
         given(request.getSession(false)).willReturn(session);
@@ -71,7 +76,7 @@ class UserServiceImplTest {
         userService.userLogin("testAccount", "12345678", request);
 
         verify(request).changeSessionId();
-        verify(session).setAttribute("user_login", user);
+        verifyLoginSnapshot(session);
         verify(userMapper, never()).updateById(org.mockito.ArgumentMatchers.<User>any());
     }
 
@@ -87,7 +92,7 @@ class UserServiceImplTest {
         userService.userLogin("testAccount", "12345678", freshRequest);
 
         verify(freshRequest, never()).changeSessionId();
-        verify(freshSession).setAttribute("user_login", user);
+        verifyLoginSnapshot(freshSession);
     }
 
     @Test
@@ -115,7 +120,7 @@ class UserServiceImplTest {
         assertThat(updateWrapper.getSqlSegment()).contains("id =").contains("userPassword =");
         assertThat(updateWrapper.getParamNameValuePairs()).containsValue(legacyPassword);
         assertThat(user.getUserPassword()).startsWith("{pbkdf2}");
-        verify(session).setAttribute("user_login", user);
+        verifyLoginSnapshot(session);
     }
 
     @Test
@@ -142,8 +147,8 @@ class UserServiceImplTest {
 
         userService.userLogin("testAccount", password, request);
 
-        verify(session).setAttribute("user_login", winningUser);
-        given(session.getAttribute("user_login")).willReturn(winningUser);
+        verifyLoginSnapshot(session);
+        given(session.getAttribute("user_login")).willReturn(authenticated(winningUser));
         assertThat(userService.getLoginUser(request)).isSameAs(winningUser);
         verify(session, never()).invalidate();
     }
@@ -209,10 +214,9 @@ class UserServiceImplTest {
     @Test
     void changePasswordClearsTemporaryStateAndRefreshesCurrentSession() {
         String temporaryPassword = "{temporary}" + userService.encodePassword("Initial-Password-1!");
-        User sessionUser = createUser(temporaryPassword);
         User databaseUser = createUser(temporaryPassword);
-        given(session.getAttribute("user_login")).willReturn(sessionUser);
-        given(userMapper.selectById(sessionUser.getId())).willReturn(databaseUser);
+        given(session.getAttribute("user_login")).willReturn(authenticated(databaseUser));
+        given(userMapper.selectById(databaseUser.getId())).willReturn(databaseUser);
         given(userMapper.updateById(org.mockito.ArgumentMatchers.<User>any())).willReturn(1);
 
         boolean changed = userService.changePassword(
@@ -224,7 +228,12 @@ class UserServiceImplTest {
         assertThat(userService.matchesPassword("New-Password-2!", databaseUser.getUserPassword())).isTrue();
         assertThat(userService.matchesPassword("Initial-Password-1!", databaseUser.getUserPassword())).isFalse();
         verify(request).changeSessionId();
-        verify(session).setAttribute("user_login", databaseUser);
+        ArgumentCaptor<AuthenticatedSession> sessionCaptor =
+                ArgumentCaptor.forClass(AuthenticatedSession.class);
+        verify(session).setAttribute(
+                org.mockito.ArgumentMatchers.eq("user_login"), sessionCaptor.capture());
+        assertThat(sessionCaptor.getValue().matchesCredential(databaseUser.getUserPassword()))
+                .isTrue();
     }
 
     @Test
@@ -306,8 +315,24 @@ class UserServiceImplTest {
     void getLoginUserRejectsSessionCreatedWithOldPasswordVersion() {
         User sessionUser = createUser(userService.encodePassword("oldPassword"));
         User databaseUser = createUser(userService.encodePassword("newPassword"));
-        given(session.getAttribute("user_login")).willReturn(sessionUser);
+        given(session.getAttribute("user_login")).willReturn(authenticated(sessionUser));
         given(userMapper.selectById(sessionUser.getId())).willReturn(databaseUser);
+
+        assertThatThrownBy(() -> userService.getLoginUser(request))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("未登录");
+
+        verify(session).invalidate();
+    }
+
+    @Test
+    void administratorPasswordResetInvalidatesExistingSessionOnNextRequest() {
+        User previousUser = createUser(userService.encodePassword("oldPassword"));
+        AuthenticatedSession existingSession = authenticated(previousUser);
+        User resetUser = createUser(
+                "{temporary}" + userService.encodePassword("temporaryPassword"));
+        given(session.getAttribute("user_login")).willReturn(existingSession);
+        given(userMapper.selectById(previousUser.getId())).willReturn(resetUser);
 
         assertThatThrownBy(() -> userService.getLoginUser(request))
                 .isInstanceOf(BusinessException.class)
@@ -319,11 +344,10 @@ class UserServiceImplTest {
     @Test
     void getLoginUserReturnsDatabaseUserWhenPasswordVersionMatches() {
         String password = userService.encodePassword("12345678");
-        User sessionUser = createUser(password);
         User databaseUser = createUser(password);
         databaseUser.setUserName("最新昵称");
-        given(session.getAttribute("user_login")).willReturn(sessionUser);
-        given(userMapper.selectById(sessionUser.getId())).willReturn(databaseUser);
+        given(session.getAttribute("user_login")).willReturn(authenticated(databaseUser));
+        given(userMapper.selectById(databaseUser.getId())).willReturn(databaseUser);
 
         assertThat(userService.getLoginUser(request)).isSameAs(databaseUser);
 
@@ -344,8 +368,54 @@ class UserServiceImplTest {
     }
 
     @Test
+    void getLoginUserRejectsLegacyPersistenceEntitySessionAttribute() {
+        given(session.getAttribute("user_login"))
+                .willReturn(createUser(userService.encodePassword("12345678")));
+
+        assertThatThrownBy(() -> userService.getLoginUser(request))
+                .isInstanceOf(BusinessException.class);
+
+        verify(session).invalidate();
+        verify(userMapper, never()).selectById(any());
+    }
+
+    @Test
+    void getLoginUserDeletesMalformedSerializedSessionAndReturnsNotLoggedIn() {
+        given(request.getRequestedSessionId()).willReturn("malformed-session-id");
+        given(request.getSession(false))
+                .willThrow(new SerializationException("malformed login state"));
+
+        assertThatThrownBy(() -> userService.getLoginUser(request))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("未登录");
+
+        verify(sessionRepository).deleteById("malformed-session-id");
+        verify(userMapper, never()).selectById(any());
+    }
+
+    @Test
+    void getLoginUserRejectsDeletedUserAndKeepsSessionOnMapperFailure() {
+        User user = createUser(userService.encodePassword("12345678"));
+        given(session.getAttribute("user_login")).willReturn(authenticated(user));
+        given(userMapper.selectById(user.getId()))
+                .willReturn(null)
+                .willThrow(new IllegalStateException("database unavailable"));
+
+        assertThatThrownBy(() -> userService.getLoginUser(request))
+                .isInstanceOf(BusinessException.class);
+        verify(session).invalidate();
+
+        org.mockito.Mockito.clearInvocations(session);
+        assertThatThrownBy(() -> userService.getLoginUser(request))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("database unavailable");
+        verify(session, never()).invalidate();
+    }
+
+    @Test
     void userLogoutInvalidatesSession() {
-        given(session.getAttribute("user_login")).willReturn(createUser(userService.encodePassword("12345678")));
+        given(session.getAttribute("user_login")).willReturn(
+                authenticated(createUser(userService.encodePassword("12345678"))));
 
         assertThat(userService.userLogout(request)).isTrue();
 
@@ -399,5 +469,15 @@ class UserServiceImplTest {
         user.setUserPassword(password);
         user.setUserRole("user");
         return user;
+    }
+
+    private static AuthenticatedSession authenticated(User user) {
+        return AuthenticatedSession.fromCredential(user.getId(), user.getUserPassword());
+    }
+
+    private static void verifyLoginSnapshot(HttpSession session) {
+        verify(session).setAttribute(
+                org.mockito.ArgumentMatchers.eq("user_login"),
+                any(AuthenticatedSession.class));
     }
 }

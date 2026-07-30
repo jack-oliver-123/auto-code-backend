@@ -61,6 +61,8 @@ class AppPreviewRedirectControllerTest {
         AppPreviewVO secondPreview = preview("http://127.0.0.1:9332/preview/token-502/");
         given(appService.createAppPreview(501L, loginUser)).willReturn(preview);
         given(appService.createAppPreview(502L, loginUser)).willReturn(secondPreview);
+        AppPreviewVO vuePreview = preview("http://127.0.0.1:9332/preview/token-vue/");
+        given(appService.createAppPreview(Long.MAX_VALUE, loginUser)).willReturn(vuePreview);
 
         mockMvc.perform(get("/static/html_501"))
                 .andExpect(status().isTemporaryRedirect())
@@ -78,9 +80,13 @@ class AppPreviewRedirectControllerTest {
         mockMvc.perform(get("/static/multi_file_502/"))
                 .andExpect(status().isTemporaryRedirect())
                 .andExpect(header().string(HttpHeaders.LOCATION, secondPreview.getPreviewUrl()));
+        mockMvc.perform(get("/static/vue_project_" + Long.MAX_VALUE))
+                .andExpect(status().isTemporaryRedirect())
+                .andExpect(header().string(HttpHeaders.LOCATION, vuePreview.getPreviewUrl()));
 
         verify(appService, times(2)).createAppPreview(501L, loginUser);
         verify(appService, times(2)).createAppPreview(502L, loginUser);
+        verify(appService).createAppPreview(Long.MAX_VALUE, loginUser);
     }
 
     @Test
@@ -92,6 +98,8 @@ class AppPreviewRedirectControllerTest {
                 "HTML_1",
                 "multi-file_1",
                 "multi_file_9223372036854775808",
+                "vue_project_01",
+                "vue_project_9223372036854775808",
                 "html_1.txt"
         };
 
