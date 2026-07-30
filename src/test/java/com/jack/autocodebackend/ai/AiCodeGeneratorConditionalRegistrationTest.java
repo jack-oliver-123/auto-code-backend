@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(properties = {
         "spring.profiles.active=test",
+        "app.redis.startup-check-enabled=false",
         "spring.autoconfigure.exclude=dev.langchain4j.openai.spring.OpenAiAutoConfiguration"
 })
 class AiCodeGeneratorConditionalRegistrationTest {

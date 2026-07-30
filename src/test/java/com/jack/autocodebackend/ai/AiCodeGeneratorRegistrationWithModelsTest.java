@@ -21,6 +21,7 @@ import static org.mockito.Mockito.mock;
         },
         properties = {
                 "spring.profiles.active=test",
+                "app.redis.startup-check-enabled=false",
                 "spring.autoconfigure.exclude=dev.langchain4j.openai.spring.OpenAiAutoConfiguration"
         }
 )

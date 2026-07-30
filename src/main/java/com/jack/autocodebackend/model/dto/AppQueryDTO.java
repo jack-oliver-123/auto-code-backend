@@ -36,6 +36,11 @@ public class AppQueryDTO extends PageRequest implements Serializable {
     private String codeGenType;
 
     /**
+     * Latest generation lifecycle status.
+     */
+    private String generationStatus;
+
+    /**
      * 部署标识
      */
     private String deployKey;

@@ -28,6 +28,12 @@ create table if not exists app
     cover        varchar(512)                       null comment '应用封面',
     initPrompt   text                               not null comment '应用初始化的 prompt',
     codeGenType  varchar(64)                        null comment '代码生成类型（枚举）',
+    generationStatus         varchar(32)  default 'PENDING' not null comment '最新生成状态',
+    generationAttemptId      varchar(64)                    null comment '最新生成尝试标识',
+    generationFailureCode    varchar(64)                    null comment '安全的生成失败分类',
+    generationFailureMessage varchar(256)                   null comment '安全的生成失败信息',
+    generationStartedTime    datetime(3)                    null comment '最新生成开始时间',
+    generationFinishedTime   datetime(3)                    null comment '最新生成结束时间',
     deployKey    varchar(64)                        null comment '部署标识',
     deployedTime datetime                           null comment '部署时间',
     priority     int      default 0                 not null comment '优先级',
@@ -38,8 +44,29 @@ create table if not exists app
     isDelete     tinyint  default 0                 not null comment '是否删除',
     UNIQUE KEY uk_deployKey (deployKey), -- 确保部署标识唯一
     INDEX idx_appName (appName),         -- 提升基于应用名称的查询性能
-    INDEX idx_userId (userId)            -- 提升基于用户 ID 的查询性能
+    INDEX idx_userId (userId),           -- 提升基于用户 ID 的查询性能
+    INDEX idx_generationStatus_startedTime_id
+        (generationStatus, generationStartedTime, id)
 ) comment '应用' collate = utf8mb4_unicode_ci;
+
+-- 已有数据库迁移步骤（在部署依赖生命周期字段的新版本前执行一次）：
+-- ALTER TABLE app
+--     ADD COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NULL AFTER codeGenType,
+--     ADD COLUMN generationAttemptId varchar(64) NULL AFTER generationStatus,
+--     ADD COLUMN generationFailureCode varchar(64) NULL AFTER generationAttemptId,
+--     ADD COLUMN generationFailureMessage varchar(256) NULL AFTER generationFailureCode,
+--     ADD COLUMN generationStartedTime datetime(3) NULL AFTER generationFailureMessage,
+--     ADD COLUMN generationFinishedTime datetime(3) NULL AFTER generationStartedTime;
+-- UPDATE app
+-- SET generationStatus = CASE
+--     WHEN codeGenType IS NOT NULL THEN 'SUCCEEDED'
+--     ELSE 'PENDING'
+-- END
+-- WHERE generationStatus IS NULL;
+-- ALTER TABLE app
+--     MODIFY COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NOT NULL;
+-- CREATE INDEX idx_generationStatus_startedTime_id
+--     ON app (generationStatus, generationStartedTime, id);
 
 
 -- 对话历史表

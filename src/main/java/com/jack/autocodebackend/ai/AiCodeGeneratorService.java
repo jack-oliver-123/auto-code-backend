@@ -2,6 +2,7 @@ package com.jack.autocodebackend.ai;
 
 import com.jack.autocodebackend.ai.model.HtmlCodeResult;
 import com.jack.autocodebackend.ai.model.MultiFileCodeResult;
+import com.jack.autocodebackend.ai.model.VueProjectCodeResult;
 import dev.langchain4j.service.SystemMessage;
 import reactor.core.publisher.Flux;
 
@@ -25,6 +26,9 @@ public interface AiCodeGeneratorService {
     @SystemMessage(fromResource = "prompt/codegen-multi-file-structured-system-prompt.md")
     MultiFileCodeResult generateMultiFileCode(String userMessage);
 
+    @SystemMessage(fromResource = "prompt/codegen-vue-structured-system-prompt.md")
+    VueProjectCodeResult generateVueProjectCode(String userMessage);
+
     /**
      * 生成 HTML 代码（流式）
      *
@@ -42,5 +46,8 @@ public interface AiCodeGeneratorService {
      */
     @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.md")
     Flux<String> generateMultiFileCodeStream(String userMessage);
+
+    @SystemMessage(fromResource = "prompt/codegen-vue-system-prompt.md")
+    Flux<String> generateVueProjectCodeStream(String userMessage);
 
 }

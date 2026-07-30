@@ -2,7 +2,10 @@ package com.jack.autocodebackend.core.deploy;
 
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.config.AppDeploymentProperties;
+import com.jack.autocodebackend.config.AppVueProjectProperties;
 import com.jack.autocodebackend.constant.AppConstant;
+import com.jack.autocodebackend.core.deploy.GeneratedArtifactLayoutResolver.GeneratedArtifactLayout;
+import com.jack.autocodebackend.core.vue.VueDistValidator;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 import org.slf4j.Logger;
@@ -32,13 +35,23 @@ public class AppDeploymentFileManager {
     private final NioFileTreeOperations operations;
     private final DirectoryPublisher directoryPublisher;
 
+    private final VueDistValidator vueDistValidator;
+
     @Autowired
-    public AppDeploymentFileManager(AppDeploymentProperties properties) {
+    public AppDeploymentFileManager(
+            AppDeploymentProperties properties,
+            VueDistValidator vueDistValidator
+    ) {
         this(
                 Path.of(AppConstant.CODE_OUTPUT_ROOT_DIR),
                 Objects.requireNonNull(properties).getRootDir(),
-                new NioFileTreeOperations()
+                new NioFileTreeOperations(),
+                vueDistValidator
         );
+    }
+
+    public AppDeploymentFileManager(AppDeploymentProperties properties) {
+        this(properties, new VueDistValidator(AppVueProjectProperties.defaults()));
     }
 
     AppDeploymentFileManager(
@@ -46,17 +59,33 @@ public class AppDeploymentFileManager {
             Path deploymentRoot,
             NioFileTreeOperations operations
     ) {
+        this(
+                outputRoot,
+                deploymentRoot,
+                operations,
+                new VueDistValidator(AppVueProjectProperties.defaults())
+        );
+    }
+
+    AppDeploymentFileManager(
+            Path outputRoot,
+            Path deploymentRoot,
+            NioFileTreeOperations operations,
+            VueDistValidator vueDistValidator
+    ) {
         this.outputRoot = normalizeRoot(outputRoot, "code output root");
         this.deploymentRoot = normalizeRoot(deploymentRoot, "deployment root");
         this.operations = Objects.requireNonNull(operations);
         this.directoryPublisher = new DirectoryPublisher(operations);
+        this.vueDistValidator = Objects.requireNonNull(vueDistValidator);
         requireNonOverlappingRoots(this.outputRoot, this.deploymentRoot);
     }
 
     public StagedDeployment stage(CodeGenTypeEnum codeGenType, Long appId) {
-        Path source = resolveSourceDirectory(codeGenType, appId);
+        GeneratedArtifactLayout layout = resolveLayout(codeGenType, appId);
+        Path source = layout.staticRoot();
         try {
-            validateSource(source, codeGenType);
+            validateSource(layout, codeGenType);
             ensureDeploymentRoot();
             Path staging = operations.createTempDirectory(deploymentRoot, ".deployment-staging-")
                     .toAbsolutePath()
@@ -105,16 +134,18 @@ public class AppDeploymentFileManager {
         return new Undeployment(this, target, tombstone);
     }
 
-    private Path resolveSourceDirectory(CodeGenTypeEnum codeGenType, Long appId) {
+    private GeneratedArtifactLayout resolveLayout(CodeGenTypeEnum codeGenType, Long appId) {
         if (codeGenType == null) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "Unsupported code generation type");
         }
         if (appId == null || appId <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "App id must be positive");
         }
-        Path source = outputRoot.resolve(codeGenType.getValue() + "_" + appId).normalize();
-        requireContained(outputRoot, source, "generated source directory");
-        return source;
+        try {
+            return GeneratedArtifactLayoutResolver.resolve(outputRoot, codeGenType, appId);
+        } catch (IllegalArgumentException exception) {
+            throw operationFailure("Generated artifact layout is invalid", exception);
+        }
     }
 
     private Path resolveTarget(String deployKey) {
@@ -124,9 +155,13 @@ public class AppDeploymentFileManager {
         return target;
     }
 
-    private void validateSource(Path source, CodeGenTypeEnum codeGenType) throws IOException {
-        operations.validateRegularTree(source);
-        validateRequiredFiles(source, codeGenType);
+    private void validateSource(GeneratedArtifactLayout layout, CodeGenTypeEnum codeGenType)
+            throws IOException {
+        if (codeGenType == CodeGenTypeEnum.VUE_PROJECT) {
+            vueDistValidator.validateProjectDist(layout.projectRoot());
+        }
+        operations.validateRegularTree(layout.staticRoot());
+        validateRequiredFiles(layout.staticRoot(), codeGenType);
     }
 
     private void validateRequiredFiles(Path directory, CodeGenTypeEnum codeGenType) throws IOException {
@@ -140,10 +175,7 @@ public class AppDeploymentFileManager {
     }
 
     private List<String> requiredFiles(CodeGenTypeEnum codeGenType) {
-        return switch (codeGenType) {
-            case HTML -> List.of("index.html");
-            case MULTI_FILE -> List.of("index.html", "style.css", "script.js");
-        };
+        return codeGenType.getRequiredStaticFiles();
     }
 
     private void ensureDeploymentRoot() throws IOException {

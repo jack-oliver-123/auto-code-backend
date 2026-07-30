@@ -18,7 +18,7 @@ import java.nio.file.Path;
 /**
  * 抽象代码文件保存器，定义校验、建目录和写文件的标准流程。
  */
-public abstract class CodeFileSaverTemplate<T extends CodeResult> {
+public abstract class CodeFileSaverTemplate<T extends CodeResult> implements CodeResultSaver {
 
     private static final Object PUBLISH_LOCK = new Object();
     private static final DirectoryPublisher DIRECTORY_PUBLISHER = new DirectoryPublisher();
@@ -58,6 +58,26 @@ public abstract class CodeFileSaverTemplate<T extends CodeResult> {
             cleanupStaging(stagingDir, exception);
             throw exception;
         }
+    }
+
+    @Override
+    public final CodeGenTypeEnum codeGenType() {
+        return getCodeType();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public final CodeFilePublication publish(CodeResult result, Long appId) {
+        if (!resultType().isInstance(result)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR,
+                    "Code result does not match generation type");
+        }
+        return publishCode((T) result, appId);
+    }
+
+    @Override
+    public Class<? extends CodeResult> resultType() {
+        return CodeResult.class;
     }
 
     protected void validateInput(T result) {

@@ -36,6 +36,16 @@ public class AppDetailVO implements Serializable {
      */
     private String codeGenType;
 
+    private String generationStatus;
+
+    private String generationFailureCode;
+
+    private String generationFailureMessage;
+
+    private Date generationStartedTime;
+
+    private Date generationFinishedTime;
+
     /**
      * 部署标识
      */

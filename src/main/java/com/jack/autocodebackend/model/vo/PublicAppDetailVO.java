@@ -21,6 +21,9 @@ public class PublicAppDetailVO implements Serializable {
 
     private String codeGenType;
 
+    @Schema(description = "Latest generation status; failure details are never public")
+    private String generationStatus;
+
     @Schema(description = "Public deployment URL; null until a deployment completes")
     private String deployUrl;
 

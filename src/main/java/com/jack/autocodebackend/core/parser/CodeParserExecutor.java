@@ -12,6 +12,7 @@ public final class CodeParserExecutor {
 
     private static final HtmlCodeParser HTML_CODE_PARSER = new HtmlCodeParser();
     private static final MultiFileCodeParser MULTI_FILE_CODE_PARSER = new MultiFileCodeParser();
+    private static final VueProjectCodeParser VUE_PROJECT_CODE_PARSER = new VueProjectCodeParser();
 
     private CodeParserExecutor() {
     }
@@ -23,6 +24,7 @@ public final class CodeParserExecutor {
         return switch (codeGenType) {
             case HTML -> HTML_CODE_PARSER.parseCode(codeContent);
             case MULTI_FILE -> MULTI_FILE_CODE_PARSER.parseCode(codeContent);
+            case VUE_PROJECT -> VUE_PROJECT_CODE_PARSER.parseCode(codeContent);
         };
     }
 }

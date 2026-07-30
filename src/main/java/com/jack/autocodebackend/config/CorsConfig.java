@@ -1,17 +1,18 @@
 package com.jack.autocodebackend.config;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
-@Configuration
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(AppCorsProperties.class)
 public class CorsConfig implements WebMvcConfigurer {
 
     private final String[] allowedOrigins;
 
-    public CorsConfig(@Value("${app.cors.allowed-origins:http://localhost:5173}") String allowedOrigins) {
-        this.allowedOrigins = allowedOrigins.split(",");
+    public CorsConfig(AppCorsProperties properties) {
+        this.allowedOrigins = properties.getAllowedOrigins().toArray(String[]::new);
     }
 
     @Override

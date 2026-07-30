@@ -351,6 +351,24 @@ class ChatHistoryServiceImplTest {
     }
 
     @Test
+    void internalMemoryQueryIsBoundedApplicationScopedAndCursorExclusive() {
+        selectedRecords = descendingHistory(20, 11, new Date());
+
+        List<ChatHistory> result = chatHistoryService.listLatestForMemory(
+                APP_ID, 21L, 10);
+
+        assertThat(result).extracting(ChatHistory::getId)
+                .containsExactly(20L, 19L, 18L, 17L, 16L, 15L, 14L, 13L, 12L, 11L);
+        assertThat(selectedPage.get().getSize()).isEqualTo(10);
+        assertThat(selectedPage.get().searchCount()).isFalse();
+        assertThat(compactSql(selectedWrapper.get()))
+                .contains("appid=", "id<", "orderbyiddesc");
+        assertThat(selectedWrapper.get().getParamNameValuePairs())
+                .containsValues(APP_ID, 21L);
+        verify(appMapper, never()).selectById(anyLong());
+    }
+
+    @Test
     void mapperAndViewContractsKeepLogicalDeleteAndInternalFieldsPrivate() throws Exception {
         TableId tableId = ChatHistory.class.getDeclaredField("id").getAnnotation(TableId.class);
         assertThat(tableId).isNotNull();

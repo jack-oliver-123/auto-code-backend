@@ -1,6 +1,8 @@
 package com.jack.autocodebackend.core.deploy;
 
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
+import com.jack.autocodebackend.config.AppVueProjectProperties;
+import com.jack.autocodebackend.core.vue.VueDistValidator;
 import com.jack.autocodebackend.exception.BusinessException;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -10,6 +12,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -71,6 +74,65 @@ class AppDeploymentFileManagerTest {
                 () -> assertTrue(Files.isRegularFile(target.resolve("script.js"))),
                 () -> assertTrue(findTemporaryArtifacts(deploymentRoot).isEmpty())
         );
+    }
+
+    @Test
+    void vueDeploymentPublishesOnlyValidatedDistForFullLongId() throws IOException {
+        long longAppId = Long.MAX_VALUE;
+        Path outputRoot = outputRoot();
+        Path deploymentRoot = deploymentRoot();
+        Path project = sourceDirectory(outputRoot, CodeGenTypeEnum.VUE_PROJECT, longAppId);
+        write(project.resolve("src/App.vue"), "private source");
+        write(project.resolve("package.json"), "private scaffold");
+        write(project.resolve("dist/index.html"),
+                "<script type=\"module\" src=\"./assets/app.js\"></script>");
+        write(project.resolve("dist/assets/app.js"), "compiled");
+        AppDeploymentFileManager manager = manager(outputRoot, deploymentRoot);
+
+        try (var staged = manager.stage(CodeGenTypeEnum.VUE_PROJECT, longAppId);
+             var published = staged.publishNew(DEPLOY_KEY)) {
+            published.commit();
+        }
+
+        Path target = deploymentRoot.resolve(DEPLOY_KEY);
+        assertAll(
+                () -> assertTrue(Files.isRegularFile(target.resolve("index.html"))),
+                () -> assertEquals("compiled", read(target.resolve("assets/app.js"))),
+                () -> assertFalse(Files.exists(target.resolve("src"))),
+                () -> assertFalse(Files.exists(target.resolve("package.json"))),
+                () -> assertTrue(read(target.resolve("index.html"))
+                        .contains("./assets/app.js"))
+        );
+    }
+
+    @Test
+    void invalidVueDistCannotReplaceExistingDeployment() throws IOException {
+        Path outputRoot = outputRoot();
+        Path deploymentRoot = deploymentRoot();
+        Path target = deploymentRoot.resolve(DEPLOY_KEY);
+        write(target.resolve("index.html"), "previous deployment");
+        Path project = sourceDirectory(outputRoot, CodeGenTypeEnum.VUE_PROJECT, APP_ID);
+        write(project.resolve("dist/assets/app.js"), "missing index");
+        AppDeploymentFileManager manager = manager(outputRoot, deploymentRoot);
+
+        assertThrows(BusinessException.class,
+                () -> manager.stage(CodeGenTypeEnum.VUE_PROJECT, APP_ID));
+        assertAll(
+                () -> assertEquals("previous deployment", read(target.resolve("index.html"))),
+                () -> assertTrue(findTemporaryArtifacts(deploymentRoot).isEmpty())
+        );
+
+        write(project.resolve("dist/index.html"), "123456");
+        AppVueProjectProperties tight = new AppVueProjectProperties(
+                1, 600, 3, 4, 7, 100, 300, 300, 180, 8,
+                2, 5, Duration.ofSeconds(1), Duration.ofMillis(10), 1,
+                "docker", "builder:test", "1", "64m", 16, "16m", 128);
+        AppDeploymentFileManager boundedManager = new AppDeploymentFileManager(
+                outputRoot, deploymentRoot, new NioFileTreeOperations(),
+                new VueDistValidator(tight));
+        assertThrows(BusinessException.class,
+                () -> boundedManager.stage(CodeGenTypeEnum.VUE_PROJECT, APP_ID));
+        assertEquals("previous deployment", read(target.resolve("index.html")));
     }
 
     @Test

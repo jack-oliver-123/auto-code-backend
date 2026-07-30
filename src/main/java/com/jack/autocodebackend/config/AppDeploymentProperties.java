@@ -71,6 +71,10 @@ public final class AppDeploymentProperties {
 }
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({AppDeploymentProperties.class, AppDeploymentLocalServerProperties.class})
+@EnableConfigurationProperties({
+        AppDeploymentProperties.class,
+        AppPreviewProperties.class,
+        AppDeploymentLocalServerProperties.class
+})
 class AppDeploymentPropertiesConfiguration {
 }

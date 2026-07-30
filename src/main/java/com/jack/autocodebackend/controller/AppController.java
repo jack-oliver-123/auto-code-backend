@@ -45,6 +45,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 import java.util.Map;
@@ -56,6 +58,8 @@ import java.util.Map;
 @RequestMapping("/app")
 @Tag(name = "Application", description = "Application management, generation, and deployment")
 public class AppController {
+
+    private static final Logger log = LoggerFactory.getLogger(AppController.class);
 
     private static final long MAX_USER_PAGE_SIZE = 20;
 
@@ -100,6 +104,9 @@ public class AppController {
                     + "the strict cookie. "
                     + "If preview capability is unavailable, the request fails before AI generation. A "
                     + "generation error or cancellation terminates the stream without a done event."
+                    + " Comment-only keep-alives may appear while work is active. An asynchronous "
+                    + "failure emits exactly one named error event and then closes normally; streamed "
+                    + "content remains provisional until done."
     )
     @io.swagger.v3.oas.annotations.parameters.RequestBody(
             required = true,
@@ -108,7 +115,8 @@ public class AppController {
     @ApiResponses({
             @ApiResponse(
                     responseCode = "200",
-                    description = "SSE content events followed by one done event on success",
+                    description = "SSE content and heartbeat comments followed by exactly one "
+                            + "done event on success or one error event on asynchronous failure",
                     content = @Content(
                             mediaType = MediaType.TEXT_EVENT_STREAM_VALUE,
                             schema = @Schema(
@@ -134,8 +142,7 @@ public class AppController {
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
                             schema = @Schema(implementation = BaseResponse.class))),
             @ApiResponse(responseCode = "500",
-                    description = "Generation or preview preparation failed; once streaming has begun "
-                            + "the connection ends without done",
+                    description = "Synchronous generation setup failed before SSE streaming began",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
                             schema = @Schema(implementation = BaseResponse.class)))
     })
@@ -153,7 +160,16 @@ public class AppController {
                         appChatRequestDTO.getMessage(),
                         loginUser
                 )
-                .map(this::toServerSentEvent);
+                .takeUntil(AppGenerationEvent::isTerminal)
+                .map(this::toServerSentEvent)
+                .onErrorResume(error -> {
+                    log.error("Unexpected application generation stream failure");
+                    return Flux.just(toServerSentEvent(new AppGenerationEvent.Failed(
+                            ErrorCode.OPERATION_ERROR.getCode(),
+                            "生成失败，请稍后重试",
+                            "FAILED"
+                    )));
+                });
     }
 
     private ServerSentEvent<String> toServerSentEvent(AppGenerationEvent generationEvent) {
@@ -161,10 +177,25 @@ public class AppController {
             return ServerSentEvent.builder(
                     JSONUtil.toJsonStr(Map.of("d", content.chunk()))).build();
         }
-        AppGenerationEvent.Completed completed = (AppGenerationEvent.Completed) generationEvent;
+        if (generationEvent instanceof AppGenerationEvent.Heartbeat) {
+            return ServerSentEvent.<String>builder()
+                    .comment("keep-alive")
+                    .build();
+        }
+        if (generationEvent instanceof AppGenerationEvent.Completed completed) {
+            return ServerSentEvent.<String>builder()
+                    .event("done")
+                    .data(JSONUtil.toJsonStr(completed.preview()))
+                    .build();
+        }
+        AppGenerationEvent.Failed failed = (AppGenerationEvent.Failed) generationEvent;
         return ServerSentEvent.<String>builder()
-                .event("done")
-                .data(JSONUtil.toJsonStr(completed.preview()))
+                .event("error")
+                .data(JSONUtil.toJsonStr(Map.of(
+                        "code", failed.code(),
+                        "message", failed.message(),
+                        "status", failed.status()
+                )))
                 .build();
     }
 

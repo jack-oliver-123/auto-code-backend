@@ -56,7 +56,8 @@ class AppControllerOpenApiContractTest {
                         "expiresAt", "bootstrap bearer", "immutable preview-snapshot",
                         "HttpOnly", "token-free preview-content", "same-site", "separate port",
                         "before AI generation",
-                        "without a done event");
+                        "without a done event", "Comment-only keep-alives",
+                        "named error event", "provisional until done");
 
         io.swagger.v3.oas.annotations.parameters.RequestBody requestBody = method.getAnnotation(
                 io.swagger.v3.oas.annotations.parameters.RequestBody.class);
@@ -75,13 +76,12 @@ class AppControllerOpenApiContractTest {
                             "1753405723000");
         });
         assertThat(responses.values())
-                .filteredOn(response -> !"SSE content events followed by one done event on success"
-                        .equals(response.description()))
+                .filteredOn(response -> !response.description().startsWith("SSE content"))
                 .allSatisfy(response -> assertThat(response.content())
                         .singleElement()
                         .satisfies(content -> assertThat(content.mediaType())
                                 .isEqualTo(MediaType.APPLICATION_JSON_VALUE)));
-        assertThat(responses.get("500").description()).contains("without done");
+        assertThat(responses.get("500").description()).contains("before SSE streaming began");
     }
 
     @Test

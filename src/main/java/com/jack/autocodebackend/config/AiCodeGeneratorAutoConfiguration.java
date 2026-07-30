@@ -2,6 +2,7 @@ package com.jack.autocodebackend.config;
 
 import com.jack.autocodebackend.ai.AiCodeGeneratorService;
 import com.jack.autocodebackend.core.AiCodeGeneratorFacade;
+import com.jack.autocodebackend.core.saver.CodeFileSaverRegistry;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.service.AiServices;
@@ -13,6 +14,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandi
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.ConfigurationCondition.ConfigurationPhase;
+import org.springframework.beans.factory.ObjectProvider;
 
 @AutoConfiguration(afterName = "dev.langchain4j.openai.spring.OpenAiAutoConfiguration")
 @ConditionalOnClass(AiServices.class)
@@ -33,8 +35,16 @@ public class AiCodeGeneratorAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    AiCodeGeneratorFacade aiCodeGeneratorFacade(AiCodeGeneratorService aiCodeGeneratorService) {
-        return new AiCodeGeneratorFacade(aiCodeGeneratorService);
+    AiCodeGeneratorFacade aiCodeGeneratorFacade(
+            AiCodeGeneratorService aiCodeGeneratorService,
+            ObjectProvider<CodeFileSaverRegistry> saverRegistryProvider,
+            ObjectProvider<AppVueProjectProperties> vueProjectPropertiesProvider
+    ) {
+        return new AiCodeGeneratorFacade(
+                aiCodeGeneratorService,
+                saverRegistryProvider.getIfAvailable(CodeFileSaverRegistry::legacy),
+                vueProjectPropertiesProvider.getIfAvailable(AppVueProjectProperties::defaults)
+        );
     }
 
     static final class RequiredChatModelsCondition extends AllNestedConditions {

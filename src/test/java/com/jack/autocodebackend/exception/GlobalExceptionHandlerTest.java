@@ -34,12 +34,28 @@ class GlobalExceptionHandlerTest {
                 .andExpect(jsonPath("$.message").value(ErrorCode.NOT_LOGIN_ERROR.getMessage()));
     }
 
+    @Test
+    void mapsDependencyUnavailableBusinessExceptionTo503Json() throws Exception {
+        mockMvc.perform(get("/dependency"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.code")
+                        .value(ErrorCode.DEPENDENCY_UNAVAILABLE.getCode()))
+                .andExpect(jsonPath("$.message")
+                        .value(ErrorCode.DEPENDENCY_UNAVAILABLE.getMessage()));
+    }
+
     @RestController
     private static class StreamingController {
 
         @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
         Flux<String> stream() {
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+
+        @GetMapping("/dependency")
+        String dependency() {
+            throw new BusinessException(ErrorCode.DEPENDENCY_UNAVAILABLE);
         }
     }
 }

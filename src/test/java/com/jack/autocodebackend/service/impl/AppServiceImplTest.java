@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.jack.autocodebackend.ai.model.enums.CodeGenTypeEnum;
 import com.jack.autocodebackend.config.AppDeploymentProperties;
+import com.jack.autocodebackend.config.AppGenerationProperties;
 import com.jack.autocodebackend.constant.AppConstant;
 import com.jack.autocodebackend.core.AiCodeGeneratorFacade;
 import com.jack.autocodebackend.core.CodeGenerationSession;
@@ -16,7 +17,14 @@ import com.jack.autocodebackend.core.deploy.AppDeploymentFileManager.StagedDeplo
 import com.jack.autocodebackend.core.deploy.AppDeploymentFileManager.Undeployment;
 import com.jack.autocodebackend.core.deploy.AppDeploymentLocalServer;
 import com.jack.autocodebackend.core.deploy.AppDeploymentLocalServer.PreviewAccess;
+import com.jack.autocodebackend.core.deploy.AppDeploymentLocalServer.PreviewPublication;
 import com.jack.autocodebackend.core.deploy.DeployKeyGenerator;
+import com.jack.autocodebackend.core.lock.AppProcessingLeaseLostException;
+import com.jack.autocodebackend.core.lock.AppProcessingLeaseManager;
+import com.jack.autocodebackend.core.parser.VueProjectCodeParser;
+import com.jack.autocodebackend.core.vue.VueProjectSourceContextLoader;
+import com.jack.autocodebackend.core.vue.VueProjectSourceSnapshot;
+import com.jack.autocodebackend.ai.model.VueProjectFile;
 import com.jack.autocodebackend.exception.BusinessException;
 import com.jack.autocodebackend.exception.ErrorCode;
 import com.jack.autocodebackend.mapper.AppMapper;
@@ -28,6 +36,7 @@ import com.jack.autocodebackend.model.dto.AppNameQueryDTO;
 import com.jack.autocodebackend.model.dto.AppQueryDTO;
 import com.jack.autocodebackend.model.dto.AppUpdateDTO;
 import com.jack.autocodebackend.model.enums.ChatHistoryMessageTypeEnum;
+import com.jack.autocodebackend.model.enums.AppGenerationStatusEnum;
 import com.jack.autocodebackend.model.vo.AppDeployVO;
 import com.jack.autocodebackend.model.vo.AppDetailVO;
 import com.jack.autocodebackend.model.vo.AppGenerationEvent;
@@ -35,6 +44,7 @@ import com.jack.autocodebackend.model.vo.AppPreviewVO;
 import com.jack.autocodebackend.model.vo.AppVO;
 import com.jack.autocodebackend.model.vo.PublicAppDetailVO;
 import com.jack.autocodebackend.service.ChatHistoryService;
+import com.jack.autocodebackend.service.ChatMemoryService;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,16 +61,20 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.ReflectionUtils;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.test.StepVerifier;
 
 import java.io.Serializable;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -72,11 +86,15 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -107,7 +125,16 @@ class AppServiceImplTest {
     private final AppDeploymentLocalServer deploymentLocalServer =
             mock(AppDeploymentLocalServer.class);
 
+    private final PreviewPublication previewPublication = mock(PreviewPublication.class);
+
     private final ChatHistoryService chatHistoryService = mock(ChatHistoryService.class);
+
+    private final ChatMemoryService chatMemoryService = mock(ChatMemoryService.class);
+
+    private final VueProjectSourceContextLoader vueProjectSourceContextLoader =
+            mock(VueProjectSourceContextLoader.class);
+
+    private final TestLeaseManager appProcessingLeaseManager = new TestLeaseManager();
 
     private final TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
 
@@ -135,6 +162,9 @@ class AppServiceImplTest {
         });
         given(deploymentLocalServer.issuePreview(anyLong(), any(CodeGenTypeEnum.class)))
                 .willReturn(previewAccess());
+        given(deploymentLocalServer.preparePreview(anyLong(), any(CodeGenTypeEnum.class)))
+                .willReturn(previewPublication);
+        given(previewPublication.access()).willReturn(previewAccess());
         given(chatHistoryService.addChatMessage(
                 anyLong(), anyLong(), any(), any(ChatHistoryMessageTypeEnum.class)))
                 .willAnswer(invocation -> historyIdSequence.incrementAndGet());
@@ -142,9 +172,21 @@ class AppServiceImplTest {
                 .willAnswer(invocation -> historyIdSequence.incrementAndGet());
         given(chatHistoryService.addAiCancellationMessage(anyLong(), anyLong()))
                 .willAnswer(invocation -> historyIdSequence.incrementAndGet());
+        given(chatMemoryService.buildPrompt(
+                anyLong(), anyLong(), any(), anyBoolean()))
+                .willAnswer(invocation -> invocation.getArgument(2));
+        given(chatMemoryService.buildPrompt(
+                anyLong(), anyLong(), any(), anyBoolean(), any(VueProjectSourceSnapshot.class)))
+                .willAnswer(invocation -> invocation.getArgument(2));
         given(chatHistoryService.removeById(anyLong())).willReturn(true);
+        given(appMapper.startGenerationAttempt(
+                anyLong(), anyLong(), any(), any(), any(), any())).willReturn(1);
+        given(appMapper.completeGenerationAttempt(
+                anyLong(), anyLong(), any(), any())).willReturn(1);
+        given(appMapper.failGenerationAttempt(
+                anyLong(), anyLong(), any(), any(), any(), any())).willReturn(1);
         given(transactionTemplate.execute(any())).willAnswer(invocation -> {
-            TransactionCallback<Boolean> callback = invocation.getArgument(0);
+            TransactionCallback<?> callback = invocation.getArgument(0);
             return callback.doInTransaction(transactionStatus);
         });
         appService = createAppService(transactionTemplate);
@@ -173,6 +215,11 @@ class AppServiceImplTest {
         assertThat(inserted.getCover()).isNull();
         assertThat(inserted.getCodeGenType()).isNull();
         assertThat(inserted.getDeployKey()).isNull();
+        assertThat(inserted.getGenerationStatus())
+                .isEqualTo(AppGenerationStatusEnum.PENDING.getValue());
+        assertThat(inserted.getGenerationAttemptId()).isNull();
+        assertThat(inserted.getGenerationFailureCode()).isNull();
+        assertThat(inserted.getGenerationFailureMessage()).isNull();
     }
 
     @Test
@@ -237,18 +284,16 @@ class AppServiceImplTest {
                 Flux.just(" leading space", " and trailing ")
                         .doOnComplete(generationCompleted::run));
         org.mockito.Mockito.doAnswer(invocation -> {
-                    Supplier<?> finalization = invocation.getArgument(0);
-                    Object result = finalization.get();
                     generationCommitted.run();
-                    return result;
+                    return null;
                 })
                 .when(generationSession)
-                .commitAfter(any());
+                .commit();
         given(appMapper.selectById(APP_ID)).willReturn(app);
         org.mockito.Mockito.doReturn(generationSession)
                 .when(aiCodeGeneratorFacade)
                 .startCodeGeneration(
-                        "build the initial website", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+                        "build the initial website", CodeGenTypeEnum.VUE_PROJECT, APP_ID);
         given(appMapper.update(any(App.class), any(UpdateWrapper.class))).willReturn(1);
 
         List<AppGenerationEvent> events = new ArrayList<>();
@@ -266,7 +311,7 @@ class AppServiceImplTest {
         ArgumentCaptor<UpdateWrapper<App>> wrapperCaptor = updateWrapperCaptor();
         verify(appMapper).update(appCaptor.capture(), wrapperCaptor.capture());
         assertThat(appCaptor.getValue().getCodeGenType())
-                .isEqualTo(CodeGenTypeEnum.MULTI_FILE.getValue());
+                .isEqualTo(CodeGenTypeEnum.VUE_PROJECT.getValue());
         assertThat(compactSql(wrapperCaptor.getValue())).contains("codegentypeisnull");
         assertOwnerConstrained(wrapperCaptor.getValue());
         InOrder generationOrder = inOrder(
@@ -275,6 +320,8 @@ class AppServiceImplTest {
                 aiCodeGeneratorFacade,
                 generationCompleted,
                 appMapper,
+                chatMemoryService,
+                previewPublication,
                 generationCommitted,
                 completedEventEmitted
         );
@@ -286,10 +333,10 @@ class AppServiceImplTest {
         );
         generationOrder.verify(deploymentLocalServer).requirePreviewAvailable();
         generationOrder.verify(aiCodeGeneratorFacade).startCodeGeneration(
-                "build the initial website", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+                "build the initial website", CodeGenTypeEnum.VUE_PROJECT, APP_ID);
         generationOrder.verify(generationCompleted).run();
         generationOrder.verify(deploymentLocalServer)
-                .issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
+                .preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT);
         generationOrder.verify(chatHistoryService).addChatMessage(
                 APP_ID,
                 OWNER_ID,
@@ -297,10 +344,120 @@ class AppServiceImplTest {
                 ChatHistoryMessageTypeEnum.AI
         );
         generationOrder.verify(appMapper).update(any(App.class), any(UpdateWrapper.class));
+        generationOrder.verify(previewPublication).commit();
         generationOrder.verify(generationCommitted).run();
+        generationOrder.verify(chatMemoryService).refresh(APP_ID);
         generationOrder.verify(completedEventEmitted).run();
-        verify(generationSession).commitAfter(any());
+        verify(generationSession).commit();
+        verify(generationSession, org.mockito.Mockito.timeout(1_000)).rollback();
+    }
+
+    @Test
+    void generationUsesOneOpaqueAttemptForStartAndTerminalCas() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
+                "refine", CodeGenTypeEnum.HTML, APP_ID))
+                .willReturn(Flux.just("complete"));
+        ArgumentCaptor<String> attemptCaptor = ArgumentCaptor.forClass(String.class);
+
+        assertSuccessfulGeneration(appService.chatToGenCode(
+                APP_ID, "refine", user(OWNER_ID)).collectList().block(), "complete");
+
+        InOrder order = inOrder(appMapper, chatHistoryService);
+        order.verify(appMapper).startGenerationAttempt(
+                eq(APP_ID),
+                eq(OWNER_ID),
+                eq(AppGenerationStatusEnum.SUCCEEDED.getValue()),
+                isNull(),
+                attemptCaptor.capture(),
+                any(Date.class)
+        );
+        order.verify(chatHistoryService).addChatMessage(
+                APP_ID, OWNER_ID, "refine", ChatHistoryMessageTypeEnum.USER);
+        assertThat(attemptCaptor.getValue()).hasSize(36);
+        verify(appMapper).completeGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), eq(attemptCaptor.getValue()), any(Date.class));
+        verify(appMapper, never()).failGenerationAttempt(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void failedAttemptUsesSameOpaqueIdentityAndNeverRunsSuccessCas() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        IllegalStateException providerFailure = new IllegalStateException("closed");
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
+                "refine", CodeGenTypeEnum.HTML, APP_ID))
+                .willReturn(Flux.error(providerFailure));
+        ArgumentCaptor<String> attemptCaptor = ArgumentCaptor.forClass(String.class);
+
+        assertFailedGeneration(appService.chatToGenCode(
+                APP_ID, "refine", user(OWNER_ID)).collectList().block());
+
+        verify(appMapper).startGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), any(), any(),
+                attemptCaptor.capture(), any(Date.class));
+        verify(appMapper).failGenerationAttempt(
+                eq(APP_ID),
+                eq(OWNER_ID),
+                eq(attemptCaptor.getValue()),
+                eq("GENERATION_FAILED"),
+                eq("生成失败，请稍后重试"),
+                any(Date.class)
+        );
+        verify(appMapper, never()).completeGenerationAttempt(
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void failedStartCasCreatesNoCurrentTurnHistoryOrProviderCall() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(appMapper.startGenerationAttempt(
+                anyLong(), anyLong(), any(), any(), any(), any())).willReturn(0);
+
+        expectBusinessException(
+                () -> appService.chatToGenCode(
+                        APP_ID, "refine", user(OWNER_ID)).blockLast(),
+                ErrorCode.OPERATION_ERROR);
+
+        verifyNoInteractions(chatHistoryService);
+        verify(aiCodeGeneratorFacadeProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void failedSuccessTransactionRollsBackBeforeRecordingTheAttemptFailure() {
+        PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
+        TransactionStatus successStatus = mock(TransactionStatus.class);
+        TransactionStatus failureStatus = mock(TransactionStatus.class);
+        given(transactionManager.getTransaction(any(TransactionDefinition.class)))
+                .willReturn(successStatus, failureStatus);
+        AppServiceImpl transactionalService = createAppService(
+                new TransactionTemplate(transactionManager));
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        CodeGenerationSession generationSession = mockGenerationSession(Flux.just("candidate"));
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(appMapper.completeGenerationAttempt(
+                anyLong(), anyLong(), any(), any())).willReturn(0);
+        org.mockito.Mockito.doReturn(generationSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration("refine", CodeGenTypeEnum.HTML, APP_ID);
+
+        List<AppGenerationEvent> events = transactionalService.chatToGenCode(
+                APP_ID, "refine", user(OWNER_ID)).collectList().block();
+
+        assertFailedGeneration(events, "candidate");
+        InOrder transactionOrder = inOrder(transactionManager);
+        transactionOrder.verify(transactionManager).rollback(successStatus);
+        transactionOrder.verify(transactionManager).commit(failureStatus);
+        verify(previewPublication, never()).commit();
+        verify(generationSession, never()).commit();
+        verify(previewPublication).close();
         verify(generationSession).rollback();
+        verify(appMapper).failGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), any(), eq("GENERATION_FAILED"),
+                eq("生成失败，请稍后重试"), any(Date.class));
     }
 
     @Test
@@ -322,8 +479,224 @@ class AppServiceImplTest {
                 APP_ID, OWNER_ID, " add a footer ", ChatHistoryMessageTypeEnum.USER);
         verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, " <footer> </footer> ", ChatHistoryMessageTypeEnum.AI);
+        verify(chatMemoryService).buildPrompt(APP_ID, 10_001L, " add a footer ", false);
+        verify(chatMemoryService).refresh(APP_ID);
         verify(appMapper, never()).update(any(App.class), any(Wrapper.class));
-        verify(deploymentLocalServer).issuePreview(APP_ID, CodeGenTypeEnum.HTML);
+        verify(deploymentLocalServer).preparePreview(APP_ID, CodeGenTypeEnum.HTML);
+        verify(previewPublication).commit();
+    }
+
+    @Test
+    void laterVueGenerationLoadsStableSourceBeforeInvokingProvider() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.VUE_PROJECT);
+        VueProjectSourceSnapshot source = sourceSnapshot("stable source");
+        String request = "修改标题";
+        String composedPrompt = "history + source + current";
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(vueProjectSourceContextLoader.load(APP_ID)).willReturn(source);
+        given(chatMemoryService.buildPrompt(APP_ID, 10_001L, request, false, source))
+                .willReturn(composedPrompt);
+        given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
+                composedPrompt, CodeGenTypeEnum.VUE_PROJECT, APP_ID))
+                .willReturn(Flux.just("project response"));
+
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, request, user(OWNER_ID)).collectList().block();
+
+        assertSuccessfulGeneration(events, "project response");
+        InOrder order = inOrder(
+                chatHistoryService,
+                vueProjectSourceContextLoader,
+                chatMemoryService,
+                deploymentLocalServer,
+                aiCodeGeneratorFacade);
+        order.verify(chatHistoryService).addChatMessage(
+                APP_ID, OWNER_ID, request, ChatHistoryMessageTypeEnum.USER);
+        order.verify(vueProjectSourceContextLoader).load(APP_ID);
+        order.verify(chatMemoryService).buildPrompt(
+                APP_ID, 10_001L, request, false, source);
+        order.verify(deploymentLocalServer).requirePreviewAvailable();
+        order.verify(aiCodeGeneratorFacade).startCodeGeneration(
+                composedPrompt, CodeGenTypeEnum.VUE_PROJECT, APP_ID);
+        verify(appMapper, never()).update(any(App.class), any(Wrapper.class));
+    }
+
+    @Test
+    void unsafeVueSourceFailsBeforeProviderAndRecordsBoundedFailure() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.VUE_PROJECT);
+        BusinessException sourceFailure = new BusinessException(
+                ErrorCode.OPERATION_ERROR, "Current Vue project source is unavailable or unsafe");
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(vueProjectSourceContextLoader.load(APP_ID)).willThrow(sourceFailure);
+
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, "修改", user(OWNER_ID)).collectList().block();
+
+        assertFailedGeneration(events);
+        verify(chatHistoryService).addAiFailureMessage(APP_ID, OWNER_ID, sourceFailure);
+        verify(aiCodeGeneratorFacadeProvider, never()).getIfAvailable();
+        verify(deploymentLocalServer, never()).requirePreviewAvailable();
+    }
+
+    @Test
+    void laterVueOrdinaryAnswerCompletesButMalformedEnvelopeFails() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.VUE_PROJECT);
+        VueProjectSourceSnapshot source = sourceSnapshot("stable source");
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(vueProjectSourceContextLoader.load(APP_ID)).willReturn(source);
+        AiCodeGeneratorFacade.CodeResponseFormatException ordinaryFailure =
+                new AiCodeGeneratorFacade.CodeResponseFormatException(
+                        new VueProjectCodeParser.NoProjectEnvelopeException());
+        CodeGenerationSession ordinarySession = mockGenerationSession(Flux.concat(
+                Flux.just("当前页面使用哈希路由。"), Flux.error(ordinaryFailure)));
+        org.mockito.Mockito.doReturn(ordinarySession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration(any(), eq(CodeGenTypeEnum.VUE_PROJECT), eq(APP_ID));
+
+        assertSuccessfulGeneration(appService.chatToGenCode(
+                APP_ID, "使用什么路由？", user(OWNER_ID)).collectList().block(),
+                "当前页面使用哈希路由。");
+        verify(ordinarySession, never()).commitAfter(any());
+
+        AiCodeGeneratorFacade.CodeResponseFormatException malformedFailure =
+                new AiCodeGeneratorFacade.CodeResponseFormatException(
+                        new VueProjectCodeParser.VueProjectProtocolException("incomplete"));
+        CodeGenerationSession malformedSession = mockGenerationSession(Flux.concat(
+                Flux.just("<<<AUTO_CODE_PROJECT_V1>>>"), Flux.error(malformedFailure)));
+        org.mockito.Mockito.doReturn(malformedSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration(any(), eq(CodeGenTypeEnum.VUE_PROJECT), eq(APP_ID));
+
+        List<AppGenerationEvent> malformedEvents = appService.chatToGenCode(
+                APP_ID, "现在修改", user(OWNER_ID)).collectList().block();
+        assertFailedGeneration(malformedEvents, "<<<AUTO_CODE_PROJECT_V1>>>");
+        verify(malformedSession, never()).commitAfter(any());
+        verify(malformedSession).rollback();
+    }
+
+    @Test
+    void chatMemoryRefreshFailureDoesNotChangeSuccessfulChunksOrCompletion() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
+                "question", CodeGenTypeEnum.HTML, APP_ID))
+                .willReturn(Flux.just(" leading ", "trailing\n"));
+        org.mockito.Mockito.doThrow(new IllegalStateException("Redis unavailable"))
+                .when(chatMemoryService).refresh(APP_ID);
+
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, "question", user(OWNER_ID)).collectList().block();
+
+        assertSuccessfulGeneration(events, " leading ", "trailing\n");
+        verify(chatMemoryService).invalidate(APP_ID);
+        verify(chatHistoryService).addChatMessage(
+                APP_ID, OWNER_ID, " leading trailing\n", ChatHistoryMessageTypeEnum.AI);
+    }
+
+    @Test
+    void leaseLossCancelsProviderRecordsFailureAndNeverCompletes() throws Exception {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        Sinks.Many<String> codeSink = Sinks.many().unicast().onBackpressureBuffer();
+        CodeGenerationSession generationSession = mockGenerationSession(codeSink.asFlux());
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        org.mockito.Mockito.doReturn(generationSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration("message", CodeGenTypeEnum.HTML, APP_ID);
+        List<AppGenerationEvent> received = new ArrayList<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch terminated = new CountDownLatch(1);
+
+        appService.chatToGenCode(APP_ID, "message", user(OWNER_ID))
+                .subscribe(received::add, error -> {
+                    failure.set(error);
+                    terminated.countDown();
+                }, terminated::countDown);
+        codeSink.tryEmitNext("partial ");
+        appProcessingLeaseManager.lose(APP_ID);
+
+        assertThat(terminated.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(failure.get()).isNull();
+        assertFailedGeneration(received, "partial ");
+        assertThat(received).noneMatch(AppGenerationEvent.Completed.class::isInstance);
+        verify(generationSession, org.mockito.Mockito.timeout(1_000)).rollback();
+        verify(generationSession, never()).commitAfter(any());
+        verify(chatHistoryService).addAiFailureMessage(
+                eq(APP_ID), eq(OWNER_ID), any(AppProcessingLeaseLostException.class));
+        verify(chatMemoryService).refresh(APP_ID);
+        verify(deploymentLocalServer, never()).issuePreview(anyLong(), any());
+
+        codeSink.tryEmitComplete();
+        verify(chatHistoryService, never()).addChatMessage(
+                APP_ID, OWNER_ID, "partial ", ChatHistoryMessageTypeEnum.AI);
+    }
+
+    @Test
+    void subsequentPlainConversationKeepsCurrentCodeAndCompletesNormally() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.MULTI_FILE);
+        User loginUser = user(OWNER_ID);
+        String question = "还记得我们刚才做了什么吗？";
+        String reply = "记得，我们刚才做了一个简单的留言板。";
+        AiCodeGeneratorFacade.CodeResponseFormatException parseFailure =
+                new AiCodeGeneratorFacade.CodeResponseFormatException(
+                        new IllegalArgumentException("未找到 HTML 代码块"));
+        CodeGenerationSession generationSession = mockGenerationSession(
+                Flux.concat(Flux.just(reply), Flux.error(parseFailure)));
+        String memoryPrompt = "历史: 留言板和 <html></html>; 当前: " + question;
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(chatMemoryService.buildPrompt(APP_ID, 10_001L, question, false))
+                .willReturn(memoryPrompt);
+        org.mockito.Mockito.doReturn(generationSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration(any(), eq(CodeGenTypeEnum.MULTI_FILE), eq(APP_ID));
+
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, question, loginUser).collectList().block();
+
+        assertSuccessfulGeneration(events, reply);
+        ArgumentCaptor<String> promptCaptor = ArgumentCaptor.forClass(String.class);
+        verify(aiCodeGeneratorFacade).startCodeGeneration(
+                promptCaptor.capture(), eq(CodeGenTypeEnum.MULTI_FILE), eq(APP_ID));
+        assertThat(promptCaptor.getValue()).isEqualTo(memoryPrompt);
+        verify(chatMemoryService).buildPrompt(APP_ID, 10_001L, question, false);
+        verify(chatHistoryService).addChatMessage(
+                APP_ID, OWNER_ID, question, ChatHistoryMessageTypeEnum.USER);
+        verify(chatHistoryService).addChatMessage(
+                APP_ID, OWNER_ID, reply, ChatHistoryMessageTypeEnum.AI);
+        verify(chatHistoryService, never()).addAiFailureMessage(anyLong(), anyLong(), any());
+        verify(chatMemoryService).refresh(APP_ID);
+        verify(generationSession, never()).commitAfter(any());
+        verify(deploymentLocalServer).preparePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
+        verify(previewPublication).commit();
+        verify(appMapper, never()).update(any(App.class), any(Wrapper.class));
+    }
+
+    @Test
+    void subsequentMalformedCodeResponseStillFailsStrictly() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.MULTI_FILE);
+        String incompleteCode = "index.html\n```html\n<html></html>\n```";
+        AiCodeGeneratorFacade.CodeResponseFormatException parseFailure =
+                new AiCodeGeneratorFacade.CodeResponseFormatException(
+                        new IllegalArgumentException("未找到 CSS 代码块"));
+        CodeGenerationSession generationSession = mockGenerationSession(
+                Flux.concat(Flux.just(incompleteCode), Flux.error(parseFailure)));
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        org.mockito.Mockito.doReturn(generationSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration("修改页面", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+        List<AppGenerationEvent> received = new ArrayList<>();
+
+        appService.chatToGenCode(APP_ID, "修改页面", user(OWNER_ID))
+                .doOnNext(received::add)
+                .blockLast();
+
+        assertFailedGeneration(received, incompleteCode);
+        verify(chatHistoryService).addAiFailureMessage(APP_ID, OWNER_ID, parseFailure);
+        verify(chatMemoryService).refresh(APP_ID);
+        verify(chatHistoryService, never()).addChatMessage(
+                APP_ID, OWNER_ID, incompleteCode, ChatHistoryMessageTypeEnum.AI);
+        verify(deploymentLocalServer, never()).issuePreview(anyLong(), any());
+        verify(generationSession, never()).commitAfter(any());
+        verify(generationSession).rollback();
     }
 
     @Test
@@ -359,7 +732,8 @@ class AppServiceImplTest {
         given(appMapper.selectById(APP_ID)).willReturn(invalidTypeApp, generatedApp);
 
         expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, "message", user(OWNER_ID)).blockLast(),
+                () -> appService.chatToGenCode(
+                        APP_ID, "message", user(OWNER_ID)).blockLast(),
                 ErrorCode.SYSTEM_ERROR);
         expectBusinessException(
                 () -> appService.chatToGenCode(APP_ID, "\u00A0\u3000", user(OWNER_ID)).blockLast(),
@@ -377,9 +751,8 @@ class AppServiceImplTest {
         given(appMapper.selectById(APP_ID)).willReturn(app);
         given(aiCodeGeneratorFacadeProvider.getIfAvailable()).willReturn(null);
 
-        expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, "message", user(OWNER_ID)).blockLast(),
-                ErrorCode.SYSTEM_ERROR);
+        assertFailedGeneration(appService.chatToGenCode(
+                APP_ID, "message", user(OWNER_ID)).collectList().block());
     }
 
     @Test
@@ -394,15 +767,11 @@ class AppServiceImplTest {
                 .requirePreviewAvailable();
         List<AppGenerationEvent> received = new ArrayList<>();
 
-        BusinessException thrown = expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, null, user(OWNER_ID))
-                        .doOnNext(received::add)
-                        .blockLast(),
-                ErrorCode.OPERATION_ERROR
-        );
+        appService.chatToGenCode(APP_ID, null, user(OWNER_ID))
+                .doOnNext(received::add)
+                .blockLast();
 
-        assertThat(thrown.getCause()).isSameAs(previewUnavailable);
-        assertThat(received).isEmpty();
+        assertFailedGeneration(received);
         InOrder failureOrder = inOrder(chatHistoryService, deploymentLocalServer);
         failureOrder.verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, "build a site", ChatHistoryMessageTypeEnum.USER);
@@ -422,13 +791,13 @@ class AppServiceImplTest {
         RuntimeException generationFailure = new RuntimeException("generation failed");
         given(appMapper.selectById(APP_ID)).willReturn(app);
         given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
-                "build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID))
+                "build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID))
                 .willReturn(Flux.concat(Flux.just("partial "), Flux.error(generationFailure)));
 
-        Throwable thrown = catchThrowable(() -> appService.chatToGenCode(
-                APP_ID, null, user(OWNER_ID)).blockLast());
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, null, user(OWNER_ID)).collectList().block();
 
-        assertThat(thrown).isSameAs(generationFailure);
+        assertFailedGeneration(events, "partial ");
         verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, "build a site", ChatHistoryMessageTypeEnum.USER);
         verify(chatHistoryService).addAiFailureMessage(APP_ID, OWNER_ID, generationFailure);
@@ -446,26 +815,25 @@ class AppServiceImplTest {
         org.mockito.Mockito.doReturn(generationSession)
                 .when(aiCodeGeneratorFacade)
                 .startCodeGeneration("refine", CodeGenTypeEnum.HTML, APP_ID);
-        given(deploymentLocalServer.issuePreview(APP_ID, CodeGenTypeEnum.HTML))
+        given(deploymentLocalServer.preparePreview(APP_ID, CodeGenTypeEnum.HTML))
                 .willThrow(previewFailure);
 
-        BusinessException thrown = expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, "refine", user(OWNER_ID)).blockLast(),
-                ErrorCode.OPERATION_ERROR);
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, "refine", user(OWNER_ID)).collectList().block();
 
-        assertThat(thrown.getCause()).isSameAs(previewFailure);
-        verify(generationSession).commitAfter(any());
+        assertFailedGeneration(events, "new version");
+        verify(generationSession, never()).commit();
         verify(generationSession).rollback();
         verify(appMapper, never()).update(any(App.class), any(Wrapper.class));
     }
 
     @Test
-    void failedInitialTypePersistenceRevokesIssuedPreviewAndOmitsCompletedEvent() {
+    void failedInitialTypePersistenceRollsBackPreparedPreviewAndOmitsCompletedEvent() {
         App app = existingApp(OWNER_ID);
         app.setInitPrompt("build a site");
         given(appMapper.selectById(APP_ID)).willReturn(app);
         given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
-                "build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID))
+                "build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID))
                 .willReturn(Flux.just("complete code"), Flux.just("retry code"));
         given(appMapper.update(any(App.class), any(UpdateWrapper.class))).willReturn(0, 1);
         given(chatHistoryService.addChatMessage(
@@ -476,35 +844,31 @@ class AppServiceImplTest {
                 .willReturn(7002L);
         List<AppGenerationEvent> received = new ArrayList<>();
 
-        BusinessException thrown = expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, null, user(OWNER_ID))
-                        .doOnNext(received::add)
-                        .blockLast(),
-                ErrorCode.OPERATION_ERROR);
+        appService.chatToGenCode(APP_ID, null, user(OWNER_ID))
+                .doOnNext(received::add)
+                .blockLast();
 
-        assertThat(thrown.getMessage()).contains("保存应用代码生成类型失败");
-        assertThat(received)
-                .containsExactly(new AppGenerationEvent.Content("complete code"));
+        assertFailedGeneration(received, "complete code");
         InOrder failureOrder = inOrder(
-                deploymentLocalServer, chatHistoryService, appMapper);
+                deploymentLocalServer, previewPublication, chatHistoryService, appMapper);
         failureOrder.verify(deploymentLocalServer)
-                .issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
+                .preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT);
         failureOrder.verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, "complete code", ChatHistoryMessageTypeEnum.AI);
         failureOrder.verify(appMapper).update(any(App.class), any(UpdateWrapper.class));
-        failureOrder.verify(deploymentLocalServer).revokePreview(APP_ID);
-        failureOrder.verify(chatHistoryService).removeById(7001L);
+        failureOrder.verify(previewPublication).close();
         failureOrder.verify(chatHistoryService).addAiFailureMessage(
-                APP_ID, OWNER_ID, thrown);
+                eq(APP_ID), eq(OWNER_ID), any(BusinessException.class));
 
         assertSuccessfulGeneration(appService.chatToGenCode(
                 APP_ID, "ignored again", user(OWNER_ID)).collectList().block(), "retry code");
         verify(aiCodeGeneratorFacade, times(2)).generateAndSaveCodeStream(
-                "build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+                "build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID);
         verify(appMapper, times(2)).update(any(App.class), any(UpdateWrapper.class));
         verify(deploymentLocalServer, times(2))
-                .issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
-        verify(deploymentLocalServer).revokePreview(APP_ID);
+                .preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT);
+        verify(previewPublication, times(2)).close();
+        verify(previewPublication).commit();
     }
 
     @Test
@@ -514,36 +878,31 @@ class AppServiceImplTest {
         IllegalStateException previewFailure = new IllegalStateException("preview failed");
         given(appMapper.selectById(APP_ID)).willReturn(app);
         given(aiCodeGeneratorFacade.generateAndSaveCodeStream(
-                "build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID))
+                "build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID))
                 .willReturn(Flux.just(" complete chunk "), Flux.just(" retry chunk "));
         given(appMapper.update(any(App.class), any(UpdateWrapper.class))).willReturn(1);
-        given(deploymentLocalServer.issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE))
+        given(deploymentLocalServer.preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT))
                 .willThrow(previewFailure);
         List<AppGenerationEvent> received = new ArrayList<>();
 
-        BusinessException thrown = expectBusinessException(
-                () -> appService.chatToGenCode(APP_ID, "ignored", user(OWNER_ID))
-                        .doOnNext(received::add)
-                        .blockLast(),
-                ErrorCode.OPERATION_ERROR
-        );
+        appService.chatToGenCode(APP_ID, "ignored", user(OWNER_ID))
+                .doOnNext(received::add)
+                .blockLast();
 
-        assertThat(thrown.getCause()).isSameAs(previewFailure);
-        assertThat(received)
-                .containsExactly(new AppGenerationEvent.Content(" complete chunk "));
+        assertFailedGeneration(received, " complete chunk ");
         verify(appMapper, never()).update(any(App.class), any(Wrapper.class));
         verify(deploymentLocalServer, never()).revokePreview(anyLong());
 
-        org.mockito.BDDMockito.willReturn(previewAccess())
+        org.mockito.BDDMockito.willReturn(previewPublication)
                 .given(deploymentLocalServer)
-                .issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
+                .preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT);
         assertSuccessfulGeneration(appService.chatToGenCode(
                 APP_ID, "still ignored", user(OWNER_ID)).collectList().block(), " retry chunk ");
         verify(aiCodeGeneratorFacade, times(2)).generateAndSaveCodeStream(
-                "build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+                "build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID);
         verify(appMapper).update(any(App.class), any(UpdateWrapper.class));
         verify(deploymentLocalServer, times(2))
-                .issuePreview(APP_ID, CodeGenTypeEnum.MULTI_FILE);
+                .preparePreview(APP_ID, CodeGenTypeEnum.VUE_PROJECT);
     }
 
     @Test
@@ -555,7 +914,8 @@ class AppServiceImplTest {
         given(appMapper.selectById(APP_ID)).willReturn(app);
         org.mockito.Mockito.doReturn(generationSession)
                 .when(aiCodeGeneratorFacade)
-                .startCodeGeneration("build a site", CodeGenTypeEnum.MULTI_FILE, APP_ID);
+                .startCodeGeneration("build a site", CodeGenTypeEnum.VUE_PROJECT, APP_ID);
+        ArgumentCaptor<String> attemptCaptor = ArgumentCaptor.forClass(String.class);
 
         Disposable subscription = appService.chatToGenCode(
                 APP_ID, null, user(OWNER_ID)).subscribe();
@@ -568,10 +928,63 @@ class AppServiceImplTest {
         verify(generationSession).rollback();
         verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, "build a site", ChatHistoryMessageTypeEnum.USER);
-        verify(chatHistoryService).addAiCancellationMessage(APP_ID, OWNER_ID);
+        verify(chatHistoryService, timeout(2_000))
+                .addAiCancellationMessage(APP_ID, OWNER_ID);
+        verify(chatMemoryService, timeout(2_000)).refresh(APP_ID);
         verify(chatHistoryService, never()).addAiFailureMessage(anyLong(), anyLong(), any());
         verify(chatHistoryService, never()).addChatMessage(
                 APP_ID, OWNER_ID, "partial", ChatHistoryMessageTypeEnum.AI);
+        verify(appMapper).startGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), eq(AppGenerationStatusEnum.PENDING.getValue()),
+                isNull(), attemptCaptor.capture(), any(Date.class));
+        verify(appMapper).failGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), eq(attemptCaptor.getValue()),
+                eq("GENERATION_CANCELLED"), eq("生成已取消"), any(Date.class));
+    }
+
+    @Test
+    void completeAttemptDeadlineEmitsHeartbeatsThenOneSafeFailure() {
+        App app = generatedApp(APP_ID, OWNER_ID, CodeGenTypeEnum.HTML);
+        CodeGenerationSession generationSession = mockGenerationSession(Flux.never());
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        org.mockito.Mockito.doReturn(generationSession)
+                .when(aiCodeGeneratorFacade)
+                .startCodeGeneration("message", CodeGenTypeEnum.HTML, APP_ID);
+        AppGenerationProperties tightLimits = new AppGenerationProperties(
+                Duration.ofSeconds(2),
+                Duration.ofMillis(4_500),
+                Duration.ofSeconds(5),
+                Duration.ofSeconds(1),
+                Duration.ofSeconds(6)
+        );
+        AppServiceImpl serviceWithTightDeadline =
+                createAppService(transactionTemplate, tightLimits);
+
+        StepVerifier.withVirtualTime(() -> serviceWithTightDeadline.chatToGenCode(
+                        APP_ID, "message", user(OWNER_ID)))
+                .expectSubscription()
+                .thenAwait(Duration.ofSeconds(1))
+                .expectNext(new AppGenerationEvent.Heartbeat())
+                .thenAwait(Duration.ofSeconds(1))
+                .expectNext(new AppGenerationEvent.Heartbeat())
+                .thenAwait(Duration.ofSeconds(1))
+                .expectNext(new AppGenerationEvent.Heartbeat())
+                .thenAwait(Duration.ofSeconds(1))
+                .expectNext(new AppGenerationEvent.Heartbeat())
+                .thenAwait(Duration.ofMillis(500))
+                .assertNext(event -> {
+                    assertThat(event).isInstanceOf(AppGenerationEvent.Failed.class);
+                    AppGenerationEvent.Failed failed = (AppGenerationEvent.Failed) event;
+                    assertThat(failed.message()).isEqualTo("生成超时，请重试");
+                })
+                .verifyComplete();
+
+        verify(appMapper).failGenerationAttempt(
+                eq(APP_ID), eq(OWNER_ID), any(), eq("GENERATION_TIMEOUT"),
+                eq("生成超时，请重试"), any(Date.class));
+        verify(generationSession).rollback();
+        verify(chatHistoryService, never()).addChatMessage(
+                eq(APP_ID), eq(OWNER_ID), any(), eq(ChatHistoryMessageTypeEnum.AI));
     }
 
     @Test
@@ -588,10 +1001,10 @@ class AppServiceImplTest {
                 "message", CodeGenTypeEnum.HTML, APP_ID))
                 .willReturn(Flux.just("retry"));
 
-        Throwable thrown = catchThrowable(() -> appService.chatToGenCode(
-                APP_ID, "message", user(OWNER_ID)).blockLast());
+        List<AppGenerationEvent> firstEvents = appService.chatToGenCode(
+                APP_ID, "message", user(OWNER_ID)).collectList().block();
 
-        assertThat(thrown).isSameAs(historyFailure);
+        assertFailedGeneration(firstEvents);
         verify(deploymentLocalServer, never()).requirePreviewAvailable();
         verify(aiCodeGeneratorFacadeProvider, never()).getIfAvailable();
         verify(chatHistoryService, never()).addAiFailureMessage(anyLong(), anyLong(), any());
@@ -615,14 +1028,12 @@ class AppServiceImplTest {
                 .willThrow(historyFailure);
         List<AppGenerationEvent> received = new ArrayList<>();
 
-        Throwable thrown = catchThrowable(() -> appService.chatToGenCode(
-                        APP_ID, "message", user(OWNER_ID))
+        appService.chatToGenCode(APP_ID, "message", user(OWNER_ID))
                 .doOnNext(received::add)
-                .blockLast());
+                .blockLast();
 
-        assertThat(thrown).isSameAs(historyFailure);
-        assertThat(received).containsExactly(new AppGenerationEvent.Content("first"));
-        verify(deploymentLocalServer).revokePreview(APP_ID);
+        assertFailedGeneration(received, "first");
+        verify(previewPublication).close();
         verify(chatHistoryService).addAiFailureMessage(APP_ID, OWNER_ID, historyFailure);
         verify(chatHistoryService, never()).removeById(anyLong());
 
@@ -644,10 +1055,10 @@ class AppServiceImplTest {
         given(chatHistoryService.addAiFailureMessage(APP_ID, OWNER_ID, providerFailure))
                 .willThrow(historyFailure);
 
-        Throwable thrown = catchThrowable(() -> appService.chatToGenCode(
-                APP_ID, "message", user(OWNER_ID)).blockLast());
+        List<AppGenerationEvent> events = appService.chatToGenCode(
+                APP_ID, "message", user(OWNER_ID)).collectList().block();
 
-        assertThat(thrown).isSameAs(providerFailure);
+        assertFailedGeneration(events);
         assertThat(providerFailure.getSuppressed()).contains(historyFailure);
         verify(deploymentLocalServer, never()).issuePreview(anyLong(), any());
     }
@@ -702,12 +1113,14 @@ class AppServiceImplTest {
                 () -> appService.chatToGenCode(APP_ID, "message", user(OWNER_ID)).blockLast(),
                 ErrorCode.OPERATION_ERROR);
         firstSubscription.dispose();
+        assertThat(appProcessingLeaseManager.awaitReleased(APP_ID, Duration.ofSeconds(2)))
+                .isTrue();
 
         assertSuccessfulGeneration(appService.chatToGenCode(
                 APP_ID, "message", user(OWNER_ID)).collectList().block(), "retry");
         verify(aiCodeGeneratorFacade, times(2)).generateAndSaveCodeStream(
                 eq("message"), eq(CodeGenTypeEnum.HTML), eq(APP_ID));
-        verify(deploymentLocalServer).issuePreview(APP_ID, CodeGenTypeEnum.HTML);
+        verify(deploymentLocalServer).preparePreview(APP_ID, CodeGenTypeEnum.HTML);
     }
 
     @Test
@@ -738,6 +1151,8 @@ class AppServiceImplTest {
         verify(deploymentFileManager, never()).stage(any(), any());
 
         generation.dispose();
+        assertThat(appProcessingLeaseManager.awaitReleased(APP_ID, Duration.ofSeconds(2)))
+                .isTrue();
 
         assertThat(appService.deleteAppByUser(APP_ID, user(OWNER_ID))).isTrue();
         verify(appMapper).delete(any(QueryWrapper.class));
@@ -1164,6 +1579,12 @@ class AppServiceImplTest {
         app.setCover("https://example.com/cover.png");
         app.setInitPrompt("Create a private analytics dashboard");
         app.setPriority(99);
+        app.setGenerationStatus(AppGenerationStatusEnum.FAILED.getValue());
+        app.setGenerationAttemptId("private-attempt-id");
+        app.setGenerationFailureCode("INVALID_AI_RESPONSE");
+        app.setGenerationFailureMessage("AI 返回内容不完整，请重试");
+        app.setGenerationStartedTime(new Date(500));
+        app.setGenerationFinishedTime(new Date(750));
         app.setCreateTime(new Date(1_000));
         app.setUpdateTime(new Date(2_000));
 
@@ -1177,9 +1598,17 @@ class AppServiceImplTest {
         assertThat(ReflectionUtils.findField(AppVO.class, "initPrompt")).isNull();
         assertThat(ReflectionUtils.findField(AppVO.class, "isDelete")).isNull();
         assertThat(summary.getDeployUrl()).isNull();
+        assertThat(summary.getGenerationStatus())
+                .isEqualTo(AppGenerationStatusEnum.FAILED.getValue());
+        assertThat(ReflectionUtils.findField(AppVO.class, "generationAttemptId")).isNull();
+        assertThat(ReflectionUtils.findField(AppVO.class, "generationFailureMessage")).isNull();
         assertThat(ReflectionTestUtils.getField(detail, "initPrompt"))
                 .isEqualTo("Create a private analytics dashboard");
         assertThat(detail.getDeployUrl()).isNull();
+        assertThat(detail.getGenerationFailureCode()).isEqualTo("INVALID_AI_RESPONSE");
+        assertThat(detail.getGenerationFailureMessage())
+                .isEqualTo("AI 返回内容不完整，请重试");
+        assertThat(ReflectionUtils.findField(AppDetailVO.class, "generationAttemptId")).isNull();
         assertThat(ReflectionUtils.findField(AppDetailVO.class, "isDelete")).isNull();
         assertThat(summaryPage.getCurrent()).isEqualTo(2);
         assertThat(summaryPage.getSize()).isEqualTo(5);
@@ -1247,9 +1676,15 @@ class AppServiceImplTest {
         assertThat(detail.getDeployUrl()).isEqualTo(
                 "https://deploy.example.com/Pub001/");
         assertThat(detail.getDeployedTime()).isEqualTo(new Date(3_000L));
+        assertThat(detail.getGenerationStatus())
+                .isEqualTo(AppGenerationStatusEnum.PENDING.getValue());
         assertThat(ReflectionUtils.findField(PublicAppDetailVO.class, "initPrompt")).isNull();
         assertThat(ReflectionUtils.findField(PublicAppDetailVO.class, "userId")).isNull();
         assertThat(ReflectionUtils.findField(PublicAppDetailVO.class, "deployKey")).isNull();
+        assertThat(ReflectionUtils.findField(
+                PublicAppDetailVO.class, "generationAttemptId")).isNull();
+        assertThat(ReflectionUtils.findField(
+                PublicAppDetailVO.class, "generationFailureMessage")).isNull();
     }
 
     @Test
@@ -1363,6 +1798,7 @@ class AppServiceImplTest {
         verify(appMapper).delete(wrapperCaptor.capture());
         assertThat(result).isTrue();
         assertOwnerConstrained(wrapperCaptor.getValue());
+        verify(chatMemoryService).purge(APP_ID);
         verify(chatHistoryService).deleteByAppId(APP_ID);
         verify(appMapper, never()).deleteById(any(Serializable.class));
         verify(deploymentLocalServer).revokePreview(APP_ID);
@@ -1396,15 +1832,42 @@ class AppServiceImplTest {
         InOrder order = inOrder(
                 appMapper,
                 deploymentFileManager,
+                chatMemoryService,
                 undeployment,
                 deploymentLocalServer
         );
         order.verify(appMapper).selectById(APP_ID);
         order.verify(deploymentFileManager).prepareUndeployment(deployKey);
+        order.verify(chatMemoryService).purge(APP_ID);
         order.verify(appMapper).delete(any(QueryWrapper.class));
         order.verify(undeployment).commit();
         order.verify(deploymentLocalServer).revokePreview(APP_ID);
         verify(undeployment, never()).rollback();
+    }
+
+    @Test
+    void ownerDeleteRestoresDeploymentWhenMemoryPurgeFailsBeforeTransaction() {
+        String deployKey = "DELM01";
+        App app = existingApp(OWNER_ID);
+        app.setDeployKey(deployKey);
+        Undeployment undeployment = mock(Undeployment.class);
+        BusinessException purgeFailure = new BusinessException(
+                ErrorCode.OPERATION_ERROR, "清理对话记忆失败");
+        given(appMapper.selectById(APP_ID)).willReturn(app);
+        given(deploymentFileManager.prepareUndeployment(deployKey)).willReturn(undeployment);
+        org.mockito.Mockito.doThrow(purgeFailure)
+                .when(chatMemoryService).purge(APP_ID);
+
+        BusinessException thrown = expectBusinessException(
+                () -> appService.deleteAppByUser(APP_ID, user(OWNER_ID)),
+                ErrorCode.OPERATION_ERROR);
+
+        assertThat(thrown.getCause()).isSameAs(purgeFailure);
+        verify(undeployment).rollback();
+        verify(appMapper, never()).delete(any(Wrapper.class));
+        verify(chatHistoryService, never()).deleteByAppId(anyLong());
+        verify(transactionTemplate, never()).execute(any());
+        verify(deploymentLocalServer, never()).revokePreview(anyLong());
     }
 
     @Test
@@ -1490,7 +1953,10 @@ class AppServiceImplTest {
                 ErrorCode.OPERATION_ERROR);
 
         assertThat(thrown.getCause()).isSameAs(historyFailure);
-        InOrder order = inOrder(appMapper, chatHistoryService, transactionManager, undeployment);
+        InOrder order = inOrder(
+                chatMemoryService, appMapper, chatHistoryService,
+                transactionManager, undeployment);
+        order.verify(chatMemoryService).purge(APP_ID);
         order.verify(appMapper).delete(any(QueryWrapper.class));
         order.verify(chatHistoryService).deleteByAppId(APP_ID);
         order.verify(transactionManager).rollback(status);
@@ -1652,6 +2118,7 @@ class AppServiceImplTest {
         assertThat(appService.deleteAppByAdmin(APP_ID)).isTrue();
 
         verify(appMapper).deleteById(APP_ID);
+        verify(chatMemoryService).purge(APP_ID);
         verify(chatHistoryService).deleteByAppId(APP_ID);
         verify(appMapper, never()).delete(any(Wrapper.class));
         verify(deploymentLocalServer).revokePreview(APP_ID);
@@ -1708,6 +2175,7 @@ class AppServiceImplTest {
         request.setCover("cdn.example");
         request.setInitPrompt("dashboard");
         request.setCodeGenType("html");
+        request.setGenerationStatus(AppGenerationStatusEnum.FAILED.getValue());
         request.setDeployKey("deploy-001");
         request.setPriority(99);
         request.setUserId(OWNER_ID);
@@ -1718,13 +2186,37 @@ class AppServiceImplTest {
 
         assertThat(sql).contains(
                 "id=", "appnamelike", "coverlike", "initpromptlike",
-                "codegentype=", "deploykey=", "priority=", "userid=");
+                "codegentype=", "generationstatus=", "deploykey=", "priority=", "userid=");
         assertThat(parameters).containsValues(
                 APP_ID, "%portal%", "%cdn.example%", "%dashboard%", "html",
-                "deploy-001", 99, OWNER_ID);
+                AppGenerationStatusEnum.FAILED.getValue(), "deploy-001", 99, OWNER_ID);
         assertThat(Arrays.stream(AppQueryDTO.class.getDeclaredFields())
                 .map(java.lang.reflect.Field::getName))
                 .doesNotContain("deployedTime", "editTime", "createTime", "updateTime", "isDelete");
+    }
+
+    @Test
+    void adminQueryRejectsUnknownGenerationStatus() {
+        AppQueryDTO request = new AppQueryDTO();
+        request.setGenerationStatus("success");
+
+        expectBusinessException(
+                () -> appService.getQueryWrapper(request),
+                ErrorCode.PARAMS_ERROR);
+    }
+
+    @Test
+    void adminQueryAllowsGenerationStatusAndLifecycleTimeSorting() {
+        AppQueryDTO request = new AppQueryDTO();
+        request.setGenerationStatus(AppGenerationStatusEnum.GENERATING.getValue());
+        request.setSortField("generationStartedTime");
+        request.setSortOrder("ascend");
+
+        String sql = compactSql(appService.getQueryWrapper(request));
+
+        assertThat(sql).contains(
+                "generationstatus=",
+                "orderbygenerationstartedtimeasc");
     }
 
     @Test
@@ -1813,6 +2305,7 @@ class AppServiceImplTest {
     ) {
         App app = existingApp(appId, ownerId);
         app.setCodeGenType(codeGenType.getValue());
+        app.setGenerationStatus(AppGenerationStatusEnum.SUCCEEDED.getValue());
         return app;
     }
 
@@ -1824,6 +2317,7 @@ class AppServiceImplTest {
         App app = new App();
         app.setId(appId);
         app.setUserId(ownerId);
+        app.setGenerationStatus(AppGenerationStatusEnum.PENDING.getValue());
         return app;
     }
 
@@ -1848,6 +2342,24 @@ class AppServiceImplTest {
         assertThat(preview.getExpiresAt()).isEqualTo(PREVIEW_EXPIRES_AT);
     }
 
+    private static void assertFailedGeneration(
+            List<AppGenerationEvent> events,
+            String... expectedChunks
+    ) {
+        assertThat(events).isNotNull().hasSize(expectedChunks.length + 1);
+        assertThat(events.subList(0, expectedChunks.length))
+                .containsExactlyElementsOf(Arrays.stream(expectedChunks)
+                        .map(AppGenerationEvent.Content::new)
+                        .toList());
+        assertThat(events.getLast()).isInstanceOf(AppGenerationEvent.Failed.class);
+        AppGenerationEvent.Failed failed =
+                (AppGenerationEvent.Failed) events.getLast();
+        assertThat(failed.code()).isEqualTo(ErrorCode.OPERATION_ERROR.getCode());
+        assertThat(failed.status()).isEqualTo(AppGenerationStatusEnum.FAILED.getValue());
+        assertThat(failed.message()).isNotBlank();
+        assertThat(events).noneMatch(AppGenerationEvent.Completed.class::isInstance);
+    }
+
     private static CodeGenerationSession mockGenerationSession(Flux<String> stream) {
         CodeGenerationSession session = mock(CodeGenerationSession.class);
         given(session.stream()).willReturn(stream);
@@ -1861,6 +2373,13 @@ class AppServiceImplTest {
     }
 
     private AppServiceImpl createAppService(TransactionTemplate template) {
+        return createAppService(template, AppGenerationProperties.defaults());
+    }
+
+    private AppServiceImpl createAppService(
+            TransactionTemplate template,
+            AppGenerationProperties generationProperties
+    ) {
         AppServiceImpl service = new AppServiceImpl(
                 aiCodeGeneratorFacadeProvider,
                 deploymentFileManager,
@@ -1868,10 +2387,19 @@ class AppServiceImplTest {
                 deploymentProperties,
                 deploymentLocalServer,
                 chatHistoryService,
-                template
+                chatMemoryService,
+                appProcessingLeaseManager,
+                template,
+                vueProjectSourceContextLoader,
+                generationProperties
         );
         ReflectionTestUtils.setField(service, "baseMapper", appMapper);
         return service;
+    }
+
+    private static VueProjectSourceSnapshot sourceSnapshot(String content) {
+        return new VueProjectSourceSnapshot(List.of(
+                new VueProjectFile("src/App.vue", content)), content.length());
     }
 
     private static void assertOwnerConstrained(Wrapper<App> wrapper) {
@@ -1907,6 +2435,106 @@ class AppServiceImplTest {
 
     private static ArgumentCaptor<QueryWrapper<App>> queryWrapperCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(QueryWrapper.class);
+    }
+
+    private static final class TestLeaseManager implements AppProcessingLeaseManager {
+
+        private final Map<Long, TestLease> active = new ConcurrentHashMap<>();
+
+        @Override
+        public AppProcessingLease acquire(Long appId) {
+            TestLease lease = new TestLease(appId, this);
+            if (active.putIfAbsent(appId, lease) != null) {
+                throw new BusinessException(
+                        ErrorCode.OPERATION_ERROR, "应用正在处理中，请稍后重试");
+            }
+            return lease;
+        }
+
+        void lose(long appId) {
+            TestLease lease = active.get(appId);
+            if (lease != null) {
+                lease.lose();
+            }
+        }
+
+        private void release(TestLease lease) {
+            active.remove(lease.appId, lease);
+        }
+
+        private boolean awaitReleased(long appId, Duration timeout) {
+            TestLease lease = active.get(appId);
+            return lease == null || lease.awaitReleased(timeout);
+        }
+    }
+
+    private static final class TestLease
+            implements AppProcessingLeaseManager.AppProcessingLease {
+
+        private final long appId;
+
+        private final TestLeaseManager manager;
+
+        private final Sinks.Empty<Void> loss = Sinks.empty();
+
+        private final CountDownLatch released = new CountDownLatch(1);
+
+        private boolean closed;
+
+        private boolean lost;
+
+        private TestLease(long appId, TestLeaseManager manager) {
+            this.appId = appId;
+            this.manager = manager;
+        }
+
+        @Override
+        public long appId() {
+            return appId;
+        }
+
+        @Override
+        public synchronized boolean isLost() {
+            return lost;
+        }
+
+        @Override
+        public synchronized void assertHeld() {
+            if (closed || lost) {
+                throw new AppProcessingLeaseLostException();
+            }
+        }
+
+        @Override
+        public Mono<Void> lossSignal() {
+            return loss.asMono();
+        }
+
+        @Override
+        public synchronized void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            manager.release(this);
+            released.countDown();
+        }
+
+        private boolean awaitReleased(Duration timeout) {
+            try {
+                return released.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        private synchronized void lose() {
+            if (!lost) {
+                lost = true;
+                loss.tryEmitError(new AppProcessingLeaseLostException());
+            }
+        }
     }
 
     private record DeploymentHandles(

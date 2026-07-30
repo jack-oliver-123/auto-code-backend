@@ -3,18 +3,33 @@ package com.jack.autocodebackend.ai.model.enums;
 import cn.hutool.core.util.ObjUtil;
 import lombok.Getter;
 
+import java.util.List;
+
 @Getter
 public enum CodeGenTypeEnum {
 
-    HTML("原生 HTML 模式", "html"),
-    MULTI_FILE("原生多文件模式", "multi_file");
+    HTML("原生 HTML 模式", "html", "", List.of("index.html")),
+    MULTI_FILE("原生多文件模式", "multi_file", "",
+            List.of("index.html", "style.css", "script.js")),
+    VUE_PROJECT("Vue 3 工程模式", "vue_project", "dist", List.of("index.html"));
 
     private final String text;
     private final String value;
 
-    CodeGenTypeEnum(String text, String value) {
+    private final String staticRootDirectory;
+
+    private final List<String> requiredStaticFiles;
+
+    CodeGenTypeEnum(
+            String text,
+            String value,
+            String staticRootDirectory,
+            List<String> requiredStaticFiles
+    ) {
         this.text = text;
         this.value = value;
+        this.staticRootDirectory = staticRootDirectory;
+        this.requiredStaticFiles = List.copyOf(requiredStaticFiles);
     }
 
     /**
