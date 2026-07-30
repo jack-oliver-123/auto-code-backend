@@ -3,15 +3,24 @@ package com.jack.autocodebackend.core.vue;
 import com.jack.autocodebackend.config.AppVueProjectProperties;
 import com.jack.autocodebackend.exception.BusinessException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -145,7 +154,9 @@ class ContainerVueProjectBuilderTest {
     }
 
     @Test
-    void readinessProbeReportsDaemonFailureWithoutExposingOutput() throws Exception {
+    @ExtendWith(OutputCaptureExtension.class)
+    void readinessProbeReportsDaemonFailureWithoutExposingOutput(CapturedOutput output)
+            throws Exception {
         BoundedProcessExecutor executor = mock(BoundedProcessExecutor.class);
         AppVueProjectProperties properties = readinessProperties(true);
         given(executor.execute(any(), any(Duration.class), anyInt()))
@@ -155,6 +166,9 @@ class ContainerVueProjectBuilderTest {
                 properties, executor, () -> 0L);
 
         assertThat(probe.checkReadiness()).isFalse();
+        assertThat(output.getAll())
+                .contains("category=command-failed")
+                .doesNotContain("daemon endpoint and environment details");
     }
 
     @Test
@@ -181,6 +195,63 @@ class ContainerVueProjectBuilderTest {
         nanoTime.incrementAndGet();
         assertThat(probe.checkReadiness()).isTrue();
         verify(executor, times(2)).execute(any(), any(Duration.class), anyInt());
+    }
+
+    @Test
+    void readinessProbeCoalescesConcurrentChecks() throws Exception {
+        BoundedProcessExecutor executor = mock(BoundedProcessExecutor.class);
+        AppVueProjectProperties properties = readinessProperties(true);
+        CountDownLatch processStarted = new CountDownLatch(1);
+        CountDownLatch releaseProcess = new CountDownLatch(1);
+        given(executor.execute(any(), any(Duration.class), anyInt()))
+                .willAnswer(invocation -> {
+                    processStarted.countDown();
+                    if (!releaseProcess.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("probe process was not released");
+                    }
+                    return new BoundedProcessExecutor.ProcessResult(0, 9, "sha256:id");
+                });
+        VueBuilderDependencyProbe probe = new VueBuilderDependencyProbe(
+                properties, executor, System::nanoTime);
+        CountDownLatch callersReady = new CountDownLatch(8);
+        CountDownLatch startCallers = new CountDownLatch(1);
+
+        try (ExecutorService callers = Executors.newFixedThreadPool(8)) {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int index = 0; index < 8; index++) {
+                results.add(callers.submit(() -> {
+                    callersReady.countDown();
+                    startCallers.await();
+                    return probe.checkReadiness();
+                }));
+            }
+            assertThat(callersReady.await(5, TimeUnit.SECONDS)).isTrue();
+            startCallers.countDown();
+            assertThat(processStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            releaseProcess.countDown();
+            for (Future<Boolean> result : results) {
+                assertThat(result.get(5, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+
+        verify(executor).execute(any(), any(Duration.class), anyInt());
+    }
+
+    @Test
+    void readinessProbeCachesSuccessfulResult() throws Exception {
+        BoundedProcessExecutor executor = mock(BoundedProcessExecutor.class);
+        AppVueProjectProperties properties = readinessProperties(true);
+        AtomicLong nanoTime = new AtomicLong();
+        given(executor.execute(any(), any(Duration.class), anyInt()))
+                .willReturn(new BoundedProcessExecutor.ProcessResult(0, 9, "sha256:id"));
+        VueBuilderDependencyProbe probe = new VueBuilderDependencyProbe(
+                properties, executor, nanoTime::get);
+
+        assertThat(probe.checkReadiness()).isTrue();
+        nanoTime.addAndGet(properties.getReadinessCacheTtl().toNanos() - 1);
+        assertThat(probe.checkReadiness()).isTrue();
+
+        verify(executor).execute(any(), any(Duration.class), anyInt());
     }
 
     @Test
@@ -212,6 +283,35 @@ class ContainerVueProjectBuilderTest {
         AppVueProjectProperties properties = readinessProperties(true);
         given(executor.execute(any(), any(Duration.class), anyInt()))
                 .willThrow(new BoundedProcessExecutor.ProcessTimeoutException());
+        VueBuilderDependencyProbe probe = new VueBuilderDependencyProbe(
+                properties, executor, () -> 0L);
+
+        assertThat(probe.checkReadiness()).isFalse();
+    }
+
+    @Test
+    void readinessProbeRestoresInterruptedStatus() throws Exception {
+        BoundedProcessExecutor executor = mock(BoundedProcessExecutor.class);
+        AppVueProjectProperties properties = readinessProperties(true);
+        given(executor.execute(any(), any(Duration.class), anyInt()))
+                .willThrow(new InterruptedException("cancelled"));
+        VueBuilderDependencyProbe probe = new VueBuilderDependencyProbe(
+                properties, executor, () -> 0L);
+
+        try {
+            assertThat(probe.checkReadiness()).isFalse();
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void readinessProbeConvertsUnexpectedRuntimeFailureToUnavailable() throws Exception {
+        BoundedProcessExecutor executor = mock(BoundedProcessExecutor.class);
+        AppVueProjectProperties properties = readinessProperties(true);
+        given(executor.execute(any(), any(Duration.class), anyInt()))
+                .willThrow(new IllegalStateException("unexpected runtime details"));
         VueBuilderDependencyProbe probe = new VueBuilderDependencyProbe(
                 properties, executor, () -> 0L);
 
