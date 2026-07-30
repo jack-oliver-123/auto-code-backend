@@ -11,6 +11,7 @@ The backend publishes generated applications to a filesystem directory. It never
 | `app.deployment.local-server.enabled` | `APP_DEPLOY_LOCAL_SERVER_ENABLED` | `true` | Enables the isolated local static listener |
 | `app.deployment.local-server.bind-address` | `APP_DEPLOY_LOCAL_SERVER_BIND_ADDRESS` | `127.0.0.1` | Address used by the local listener |
 | `app.deployment.local-server.port` | `APP_DEPLOY_LOCAL_SERVER_PORT` | `9332` | Port used by the local listener; `0` is intended for tests only |
+| `app.preview.host` | `APP_PREVIEW_HOST` | `http://localhost:9332` | Public origin used to build preview bootstrap URLs |
 
 Use a persistent volume for `root-dir` in production. It must be on a different, non-nested path from `tmp/code_output`. Staging, backup, and tombstone directories are created beside final deployment directories, so the whole deployment root must stay on one filesystem and be writable by the backend process.
 
@@ -50,6 +51,7 @@ temporary storage mounted writable.
 | `protocol-version` / `VUE_PROJECT_PROTOCOL_VERSION` | `1` | Accepted streaming protocol |
 | `response-max-chars` / `VUE_PROJECT_RESPONSE_MAX_CHARS` | `600000` | Complete AI response |
 | `model-max-files` / `VUE_PROJECT_MODEL_MAX_FILES` | `24` | Model-owned source files |
+| `scaffold-file-count` / `VUE_PROJECT_SCAFFOLD_FILE_COUNT` | `4` | Canonical backend-owned scaffold count; must remain `4` |
 | `combined-max-files` / `VUE_PROJECT_COMBINED_MAX_FILES` | `28` | Source plus four scaffold files; must remain below 30 |
 | `file-max-chars` / `VUE_PROJECT_FILE_MAX_CHARS` | `100000` | One source file |
 | `source-max-chars` / `VUE_PROJECT_SOURCE_MAX_CHARS` | `500000` | Complete model-owned source |
@@ -181,7 +183,18 @@ Generated HTML and JavaScript are untrusted. Do not map the deployment root into
 
 Before rollout, verify the real `app` table has `UNIQUE KEY uk_deployKey (deployKey)`. Re-running `sql/init.sql` does not add the index to an already existing table because it uses `CREATE TABLE IF NOT EXISTS`.
 
-The current processing guard coordinates one JVM. Run a single deployment writer for a shared deployment root until distributed locking and shared-storage coordination are implemented. Database uniqueness still protects key assignment, but it does not serialize same-App directory replacement across multiple backend instances.
+Every backend instance that accepts application mutations must use the same
+Redis processing-lease namespace. The lease serializes generation, preview,
+deployment, and deletion for the same application across instances; database
+uniqueness still protects deploy-key assignment.
+
+The lease does not replicate files or preview grants. Instances that can handle
+the same application must see the same generated-output, preview-snapshot, and
+deployment roots. The built-in JDK preview listener keeps grants in process
+memory and is intended for local development, so a multi-instance topology must
+route a bootstrap/content flow back to its issuing instance or replace it with a
+shared token-aware preview provider. Never route traffic to legacy instances
+that use the former process-local guard.
 
 ## Smoke Test
 
