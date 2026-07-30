@@ -67,6 +67,7 @@ class AppGenerationLifecycleContractTest {
         assertThat(migration).contains(
                 "generationStatus         varchar(32)  default 'PENDING' not null",
                 "idx_generationStatus_startedTime_id",
+                "ADD COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NULL",
                 "WHEN codeGenType IS NOT NULL THEN 'SUCCEEDED'",
                 "ELSE 'PENDING'",
                 "MODIFY COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NOT NULL");

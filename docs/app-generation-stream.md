@@ -85,12 +85,17 @@ errors or an unknown lease result leave the row unchanged.
 
 ## Existing Database Migration
 
-Run the additive migration before deploying code that reads lifecycle fields.
-The canonical copy is retained beside the table definition in `sql/init.sql`.
+This is a coordinated cutover, not a rolling migration. Drain every legacy
+backend instance and stop application create/generate/deploy/delete traffic
+before running the additive migration. Legacy instances use only process-local
+generation locks and do not write lifecycle fields, so old and new binaries must
+never share traffic. Deploy the new version only after the migration and
+backfill complete. The canonical copy is retained beside the table definition
+in `sql/init.sql`.
 
 ```sql
 ALTER TABLE app
-    ADD COLUMN generationStatus varchar(32) NULL AFTER codeGenType,
+    ADD COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NULL AFTER codeGenType,
     ADD COLUMN generationAttemptId varchar(64) NULL AFTER generationStatus,
     ADD COLUMN generationFailureCode varchar(64) NULL AFTER generationAttemptId,
     ADD COLUMN generationFailureMessage varchar(256) NULL AFTER generationFailureCode,
@@ -114,4 +119,7 @@ CREATE INDEX idx_generationStatus_startedTime_id
 Rows with a persisted generation type are backfilled as `SUCCEEDED`; ambiguous
 rows without one are `PENDING`. First-generation behavior remains based on the
 persisted `codeGenType`, not the lifecycle status. Confirm the index does not
-already exist before executing the final statement.
+already exist before executing the final statement. Before routing traffic,
+verify that no row has a null status and that no row with a non-null
+`codeGenType`, null attempt id, and `PENDING` status remains from a legacy
+completion.

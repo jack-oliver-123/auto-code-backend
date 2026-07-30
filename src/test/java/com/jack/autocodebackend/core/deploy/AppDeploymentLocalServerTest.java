@@ -914,12 +914,9 @@ class AppDeploymentLocalServerTest {
         String contentSecurityPolicy = response.headers()
                 .firstValue("Content-Security-Policy")
                 .orElseThrow();
-        assertEquals(
-                "sandbox allow-scripts allow-forms allow-same-origin",
-                contentSecurityPolicy
-        );
-        assertTrue(contentSecurityPolicy.contains("allow-same-origin"));
-        assertTrue(contentSecurityPolicy.contains("allow-forms"));
+        assertEquals("sandbox allow-scripts", contentSecurityPolicy);
+        assertFalse(contentSecurityPolicy.contains("allow-same-origin"));
+        assertFalse(contentSecurityPolicy.contains("allow-forms"));
         assertFalse(contentSecurityPolicy.contains("allow-top-navigation"));
         assertEquals(
                 "camera=(), microphone=(), geolocation=()",
@@ -936,9 +933,7 @@ class AppDeploymentLocalServerTest {
         String contentSecurityPolicy = response.headers()
                 .firstValue("Content-Security-Policy")
                 .orElseThrow();
-        assertTrue(contentSecurityPolicy.startsWith(
-                "sandbox allow-scripts allow-forms allow-same-origin"
-        ));
+        assertTrue(contentSecurityPolicy.startsWith("sandbox allow-scripts;"));
         assertTrue(contentSecurityPolicy.contains("connect-src 'none'"));
         assertTrue(contentSecurityPolicy.contains("img-src 'self' data: blob:"));
         assertTrue(contentSecurityPolicy.contains("style-src 'self' 'unsafe-inline' data:"));
@@ -949,8 +944,8 @@ class AppDeploymentLocalServerTest {
         assertTrue(contentSecurityPolicy.contains("base-uri 'none'"));
         assertTrue(contentSecurityPolicy.contains("object-src 'none'"));
         assertTrue(contentSecurityPolicy.contains("frame-src 'none'"));
-        assertTrue(contentSecurityPolicy.contains("allow-same-origin"));
-        assertTrue(contentSecurityPolicy.contains("allow-forms"));
+        assertFalse(contentSecurityPolicy.contains("allow-same-origin"));
+        assertFalse(contentSecurityPolicy.contains("allow-forms"));
         assertFalse(contentSecurityPolicy.contains("allow-top-navigation"));
         assertTrue(response.headers().firstValue("Access-Control-Allow-Origin").isEmpty());
         assertTrue(response.headers().firstValue("Access-Control-Allow-Credentials").isEmpty());

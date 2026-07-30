@@ -51,7 +51,7 @@ create table if not exists app
 
 -- 已有数据库迁移步骤（在部署依赖生命周期字段的新版本前执行一次）：
 -- ALTER TABLE app
---     ADD COLUMN generationStatus varchar(32) NULL AFTER codeGenType,
+--     ADD COLUMN generationStatus varchar(32) DEFAULT 'PENDING' NULL AFTER codeGenType,
 --     ADD COLUMN generationAttemptId varchar(64) NULL AFTER generationStatus,
 --     ADD COLUMN generationFailureCode varchar(64) NULL AFTER generationAttemptId,
 --     ADD COLUMN generationFailureMessage varchar(256) NULL AFTER generationFailureCode,

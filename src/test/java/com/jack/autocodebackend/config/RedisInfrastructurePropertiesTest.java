@@ -36,6 +36,7 @@ class RedisInfrastructurePropertiesTest {
                     AppProcessingLeaseProperties.class);
             assertThat(lease.getDuration()).isEqualTo(Duration.ofSeconds(30));
             assertThat(lease.getRenewalInterval()).isEqualTo(Duration.ofSeconds(10));
+            assertThat(lease.getRenewalParallelism()).isEqualTo(4);
         });
     }
 
@@ -57,6 +58,8 @@ class RedisInfrastructurePropertiesTest {
         assertBindingFailure("app.processing-lease.duration=0s");
         assertBindingFailure("app.processing-lease.renewal-interval=15s",
                 "app.processing-lease.duration=30s");
+        assertBindingFailure("app.processing-lease.renewal-parallelism=0");
+        assertBindingFailure("app.processing-lease.renewal-parallelism=65");
         assertBindingFailure("app.processing-lease.redis-key-prefix= ");
     }
 
@@ -76,6 +79,7 @@ class RedisInfrastructurePropertiesTest {
                 "same-site: ${SESSION_COOKIE_SAME_SITE:lax}",
                 "redis-key-prefix: ${CHAT_MEMORY_REDIS_KEY_PREFIX:auto-code:chat-memory:v1:}",
                 "invalidation-channel: ${CHAT_MEMORY_INVALIDATION_CHANNEL:auto-code:chat-memory:invalidation:v1}",
+                "renewal-parallelism: ${APP_PROCESSING_LEASE_RENEWAL_PARALLELISM:4}",
                 "redis-key-prefix: ${APP_PROCESSING_LEASE_REDIS_KEY_PREFIX:auto-code:processing-lease:v1:}")
                 .contains("session:\n    timeout:",
                         "data:\n      redis:\n        namespace:")

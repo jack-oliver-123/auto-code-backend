@@ -13,11 +13,14 @@ public final class AppProcessingLeaseProperties {
 
     private final Duration renewalInterval;
 
+    private final int renewalParallelism;
+
     private final String redisKeyPrefix;
 
     public AppProcessingLeaseProperties(
             @DefaultValue("30s") Duration duration,
             @DefaultValue("10s") Duration renewalInterval,
+            @DefaultValue("4") int renewalParallelism,
             @DefaultValue("auto-code:processing-lease:v1:") String redisKeyPrefix
     ) {
         this.duration = requirePositive(duration, "duration");
@@ -26,6 +29,10 @@ public final class AppProcessingLeaseProperties {
             throw new IllegalArgumentException(
                     "renewalInterval must be less than half of duration");
         }
+        if (renewalParallelism < 1 || renewalParallelism > 64) {
+            throw new IllegalArgumentException("renewalParallelism must be between 1 and 64");
+        }
+        this.renewalParallelism = renewalParallelism;
         String normalizedPrefix = Objects.requireNonNull(
                 redisKeyPrefix, "redisKeyPrefix must not be null").trim();
         if (normalizedPrefix.isEmpty()) {
@@ -40,6 +47,10 @@ public final class AppProcessingLeaseProperties {
 
     public Duration getRenewalInterval() {
         return renewalInterval;
+    }
+
+    public int getRenewalParallelism() {
+        return renewalParallelism;
     }
 
     public String getRedisKeyPrefix() {

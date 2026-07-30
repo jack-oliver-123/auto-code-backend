@@ -12,6 +12,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
@@ -56,7 +57,7 @@ class RedisAppProcessingLeaseManagerTest {
     @BeforeEach
     void setUp() {
         AppProcessingLeaseProperties properties = new AppProcessingLeaseProperties(
-                Duration.ofSeconds(30), Duration.ofSeconds(10), "test:lease:");
+                Duration.ofSeconds(30), Duration.ofSeconds(10), 4, "test:lease:");
         given(redisTemplate.opsForValue()).willReturn(valueOperations);
         given(valueOperations.setIfAbsent(any(), any(), any(Duration.class)))
                 .willReturn(true);
@@ -190,5 +191,42 @@ class RedisAppProcessingLeaseManagerTest {
         verify(redisTemplate).execute(
                 eq(RedisAppProcessingLeaseManager.RELEASE_SCRIPT),
                 anyList(), any(Object[].class));
+    }
+
+    @Test
+    void configuredWorkersRenewSlowLeasesConcurrently() throws Exception {
+        AppProcessingLeaseProperties properties = new AppProcessingLeaseProperties(
+                Duration.ofSeconds(1), Duration.ofMillis(100), 2, "parallel:lease:");
+        CountDownLatch renewalsStarted = new CountDownLatch(2);
+        CountDownLatch releaseRenewals = new CountDownLatch(1);
+        given(redisTemplate.execute(
+                any(RedisScript.class), anyList(), any(Object[].class)))
+                .willAnswer(invocation -> {
+                    RedisScript<Long> script = invocation.getArgument(0);
+                    if (script == RedisAppProcessingLeaseManager.RENEW_SCRIPT) {
+                        renewalsStarted.countDown();
+                        releaseRenewals.await(2, TimeUnit.SECONDS);
+                    }
+                    return 1L;
+                });
+        RedisAppProcessingLeaseManager parallelManager =
+                new RedisAppProcessingLeaseManager(redisTemplate, properties);
+        AppProcessingLeaseManager.AppProcessingLease first = null;
+        AppProcessingLeaseManager.AppProcessingLease second = null;
+        try {
+            first = parallelManager.acquire(APP_ID);
+            second = parallelManager.acquire(APP_ID + 1);
+
+            assertThat(renewalsStarted.await(2, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseRenewals.countDown();
+            if (first != null) {
+                first.close();
+            }
+            if (second != null) {
+                second.close();
+            }
+            parallelManager.shutdown();
+        }
     }
 }

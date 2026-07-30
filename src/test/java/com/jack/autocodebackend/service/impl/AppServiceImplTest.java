@@ -94,6 +94,7 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -927,8 +928,9 @@ class AppServiceImplTest {
         verify(generationSession).rollback();
         verify(chatHistoryService).addChatMessage(
                 APP_ID, OWNER_ID, "build a site", ChatHistoryMessageTypeEnum.USER);
-        verify(chatHistoryService).addAiCancellationMessage(APP_ID, OWNER_ID);
-        verify(chatMemoryService).refresh(APP_ID);
+        verify(chatHistoryService, timeout(2_000))
+                .addAiCancellationMessage(APP_ID, OWNER_ID);
+        verify(chatMemoryService, timeout(2_000)).refresh(APP_ID);
         verify(chatHistoryService, never()).addAiFailureMessage(anyLong(), anyLong(), any());
         verify(chatHistoryService, never()).addChatMessage(
                 APP_ID, OWNER_ID, "partial", ChatHistoryMessageTypeEnum.AI);
@@ -1111,6 +1113,8 @@ class AppServiceImplTest {
                 () -> appService.chatToGenCode(APP_ID, "message", user(OWNER_ID)).blockLast(),
                 ErrorCode.OPERATION_ERROR);
         firstSubscription.dispose();
+        assertThat(appProcessingLeaseManager.awaitReleased(APP_ID, Duration.ofSeconds(2)))
+                .isTrue();
 
         assertSuccessfulGeneration(appService.chatToGenCode(
                 APP_ID, "message", user(OWNER_ID)).collectList().block(), "retry");
@@ -1147,6 +1151,8 @@ class AppServiceImplTest {
         verify(deploymentFileManager, never()).stage(any(), any());
 
         generation.dispose();
+        assertThat(appProcessingLeaseManager.awaitReleased(APP_ID, Duration.ofSeconds(2)))
+                .isTrue();
 
         assertThat(appService.deleteAppByUser(APP_ID, user(OWNER_ID))).isTrue();
         verify(appMapper).delete(any(QueryWrapper.class));
@@ -2455,6 +2461,11 @@ class AppServiceImplTest {
         private void release(TestLease lease) {
             active.remove(lease.appId, lease);
         }
+
+        private boolean awaitReleased(long appId, Duration timeout) {
+            TestLease lease = active.get(appId);
+            return lease == null || lease.awaitReleased(timeout);
+        }
     }
 
     private static final class TestLease
@@ -2465,6 +2476,8 @@ class AppServiceImplTest {
         private final TestLeaseManager manager;
 
         private final Sinks.Empty<Void> loss = Sinks.empty();
+
+        private final CountDownLatch released = new CountDownLatch(1);
 
         private boolean closed;
 
@@ -2504,6 +2517,16 @@ class AppServiceImplTest {
             }
             closed = true;
             manager.release(this);
+            released.countDown();
+        }
+
+        private boolean awaitReleased(Duration timeout) {
+            try {
+                return released.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
 
         private synchronized void lose() {

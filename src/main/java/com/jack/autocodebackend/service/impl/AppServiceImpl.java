@@ -57,6 +57,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -229,19 +231,25 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public Flux<AppGenerationEvent> chatToGenCode(Long appId, String message, User loginUser) {
         validateAppId(appId);
         validateLoginUser(loginUser);
-        return Flux.using(
-                () -> appProcessingLeaseManager.acquire(appId),
-                lease -> createDurableCodeGenerationStream(appId, message, loginUser, lease),
-                AppProcessingLease::close,
-                true
-        );
+        return Flux.defer(() -> {
+            AtomicReference<GenerationAttemptContext> activeAttempt = new AtomicReference<>();
+            return Flux.usingWhen(
+                    Mono.fromCallable(() -> appProcessingLeaseManager.acquire(appId)),
+                    lease -> createDurableCodeGenerationStream(
+                            appId, message, loginUser, lease, activeAttempt),
+                    this::releaseLeaseAsync,
+                    (lease, ignored) -> releaseLeaseAsync(lease),
+                    lease -> cancelAttemptAndReleaseAsync(activeAttempt.get(), lease)
+            );
+        });
     }
 
     private Flux<AppGenerationEvent> createDurableCodeGenerationStream(
             Long appId,
             String message,
             User loginUser,
-            AppProcessingLease lease
+            AppProcessingLease lease,
+            AtomicReference<GenerationAttemptContext> activeAttempt
     ) {
         Long userId = loginUser.getId();
         return Flux.defer(() -> {
@@ -250,6 +258,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
 
             GenerationInput generationInput = resolveGenerationInput(app, message);
             GenerationAttemptContext attempt = startGenerationAttempt(app, userId);
+            activeAttempt.set(attempt);
             Flux<AppGenerationEvent> generationWork = runGenerationAttempt(
                     attempt, generationInput, lease);
             Flux<AppGenerationEvent> leaseLoss = lease.lossSignal()
@@ -264,10 +273,34 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                             Flux.defer(() -> Flux.error(attempt.timeoutFailure(
                                     generationProperties.getCompleteAttemptTimeout())))
                     )
-                    .onErrorResume(error -> finalizeFailureAndEmit(attempt, error))
-                    .doOnCancel(() -> finalizeCancellation(attempt));
+                    .onErrorResume(error -> Flux.defer(
+                                    () -> finalizeFailureAndEmit(attempt, error))
+                            .subscribeOn(Schedulers.boundedElastic()));
             return withHeartbeats(attemptWork);
         });
+    }
+
+    private Mono<Void> releaseLeaseAsync(AppProcessingLease lease) {
+        return Mono.fromRunnable(lease::close)
+                .subscribeOn(Schedulers.boundedElastic())
+                .then();
+    }
+
+    private Mono<Void> cancelAttemptAndReleaseAsync(
+            GenerationAttemptContext attempt,
+            AppProcessingLease lease
+    ) {
+        return Mono.fromRunnable(() -> {
+                    try {
+                        if (attempt != null) {
+                            finalizeCancellation(attempt);
+                        }
+                    } finally {
+                        lease.close();
+                    }
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .then();
     }
 
     private GenerationInput resolveGenerationInput(App app, String message) {

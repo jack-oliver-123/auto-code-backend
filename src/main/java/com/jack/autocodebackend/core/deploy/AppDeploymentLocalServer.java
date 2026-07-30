@@ -81,10 +81,10 @@ public final class AppDeploymentLocalServer implements DisposableBean {
     private static final Duration PREVIEW_TTL = Duration.ofMinutes(15);
 
     private static final String DEPLOYMENT_CONTENT_SECURITY_POLICY =
-            "sandbox allow-scripts allow-forms allow-same-origin";
+            "sandbox allow-scripts";
 
     private static final String PREVIEW_CONTENT_SECURITY_POLICY =
-            "sandbox allow-scripts allow-forms allow-same-origin; "
+            "sandbox allow-scripts; "
             + "default-src 'none'; connect-src 'none'; "
             + "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' data:; "
             + "script-src 'self' 'unsafe-inline' blob:; font-src 'self' data:; "
@@ -805,10 +805,6 @@ public final class AppDeploymentLocalServer implements DisposableBean {
 
     private static List<String> requiredPreviewFiles(CodeGenTypeEnum type) {
         return type.getRequiredStaticFiles();
-    }
-
-    private static String buildPreviewDirectoryName(long appId, CodeGenTypeEnum type) {
-        return type.getValue() + "_" + appId;
     }
 
     private Optional<PreviewGrant> findPreviewGrant(String token) {

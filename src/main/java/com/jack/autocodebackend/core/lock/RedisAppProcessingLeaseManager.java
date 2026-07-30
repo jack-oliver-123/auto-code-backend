@@ -24,6 +24,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 public class RedisAppProcessingLeaseManager implements AppProcessingLeaseManager {
@@ -63,12 +64,26 @@ public class RedisAppProcessingLeaseManager implements AppProcessingLeaseManager
         this(
                 redisTemplate,
                 properties,
-                Executors.newSingleThreadScheduledExecutor(runnable -> {
-                    Thread thread = new Thread(runnable, "app-processing-lease-renewal");
+                createRenewalExecutor(properties),
+                new SecureRandom()
+        );
+    }
+
+    private static ScheduledExecutorService createRenewalExecutor(
+            AppProcessingLeaseProperties properties
+    ) {
+        AtomicInteger threadSequence = new AtomicInteger();
+        return Executors.newScheduledThreadPool(
+                properties.getRenewalParallelism(),
+                runnable -> {
+                    Thread thread = new Thread(
+                            runnable,
+                            "app-processing-lease-renewal-"
+                                    + threadSequence.incrementAndGet()
+                    );
                     thread.setDaemon(true);
                     return thread;
-                }),
-                new SecureRandom()
+                }
         );
     }
 

@@ -47,6 +47,7 @@ environment or the ignored `application-local.yml`.
 | `CHAT_MEMORY_INVALIDATION_CHANNEL` | `auto-code:chat-memory:invalidation:v1` | Pub/Sub channel |
 | `APP_PROCESSING_LEASE_DURATION` | `30s` | Distributed lease lifetime |
 | `APP_PROCESSING_LEASE_RENEWAL_INTERVAL` | `10s` | Lease renewal interval; must be below half the lifetime |
+| `APP_PROCESSING_LEASE_RENEWAL_PARALLELISM` | `4` | Concurrent lease renewal workers (1-64) |
 | `APP_PROCESSING_LEASE_REDIS_KEY_PREFIX` | `auto-code:processing-lease:v1:` | Lease key namespace |
 
 All sizes and durations must be positive. The total memory character limit must
@@ -95,10 +96,18 @@ operation still uses Redis and relies on that operation's result.
 
 ## Migration And Recovery
 
-Switching from process-local sessions is a one-time login migration: existing
-users must authenticate again because old in-memory sessions are not copied to
-Redis. Only a user ID and a non-reversible credential fingerprint are stored in
-the new Session attribute.
+Switching from process-local sessions and locks requires a coordinated cutover.
+Drain every legacy backend instance before routing any traffic to the new
+version; mixed-version routing is unsupported. Legacy instances neither honor
+the Redis application lease nor write the new Session attribute format, so a
+mixed fleet can concurrently mutate one app and can alternate users between
+authenticated and unauthenticated responses. Existing users must authenticate
+again because old in-memory sessions are not copied to Redis. Only a user ID and
+a non-reversible credential fingerprint are stored in the new Session attribute.
+
+After legacy instances are drained, run the lifecycle migration and backfill in
+`app-generation-stream.md`, verify completed legacy rows are `SUCCEEDED`, deploy
+the new version, and only then restore traffic.
 
 Conversation memory needs no backfill. A cache miss or cold Redis start rebuilds
 the bounded snapshot from active MySQL `chat_history` rows. Deleting an app

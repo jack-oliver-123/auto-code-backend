@@ -89,6 +89,7 @@ app:
   processing-lease:
     duration: ${APP_PROCESSING_LEASE_DURATION:30s}
     renewal-interval: ${APP_PROCESSING_LEASE_RENEWAL_INTERVAL:10s}
+    renewal-parallelism: ${APP_PROCESSING_LEASE_RENEWAL_PARALLELISM:4}
     redis-key-prefix: ${APP_PROCESSING_LEASE_REDIS_KEY_PREFIX:auto-code:processing-lease:v1:}
   deployment:
     root-dir: ${APP_DEPLOY_ROOT_DIR:tmp/code_deploy}
